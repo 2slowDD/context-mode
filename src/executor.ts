@@ -74,7 +74,11 @@ export class PolyglotExecutor {
         return await this.#compileAndRun(filePath, tmpDir, timeout);
       }
 
-      return await this.#spawn(cmd, tmpDir, timeout);
+      // Shell commands run in the project directory so git, relative paths,
+      // and other project-aware tools work naturally. Non-shell languages
+      // run in the temp directory where their script file is written.
+      const cwd = language === "shell" ? this.#projectRoot : tmpDir;
+      return await this.#spawn(cmd, cwd, timeout);
     } finally {
       try {
         rmSync(tmpDir, { recursive: true, force: true });
