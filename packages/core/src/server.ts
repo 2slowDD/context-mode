@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, unlinkSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { z } from "zod";
@@ -38,8 +38,33 @@ const executor = new PolyglotExecutor({
 
 // Lazy singleton — no DB overhead unless index/search is used
 let _store: ContentStore | null = null;
+
+/**
+ * Auto-index session events files written by SessionStart hook.
+ * Scans ~/.claude/context-mode/sessions/ for *-events.md files.
+ * CLAUDE_PROJECT_DIR is NOT available to MCP servers — only to hooks —
+ * so we glob-scan instead of computing a specific hash.
+ * Files are consumed (deleted) after indexing to prevent double-indexing.
+ * Called on every getStore() — readdirSync is sub-millisecond when no files match.
+ */
+function maybeIndexSessionEvents(store: ContentStore): void {
+  try {
+    const sessionsDir = join(homedir(), ".claude", "context-mode", "sessions");
+    if (!existsSync(sessionsDir)) return;
+    const files = readdirSync(sessionsDir).filter(f => f.endsWith("-events.md"));
+    for (const file of files) {
+      const filePath = join(sessionsDir, file);
+      try {
+        store.index({ path: filePath, source: "session-events" });
+        unlinkSync(filePath);
+      } catch { /* best-effort per file */ }
+    }
+  } catch { /* best-effort — session continuity never blocks tools */ }
+}
+
 function getStore(): ContentStore {
   if (!_store) _store = new ContentStore();
+  maybeIndexSessionEvents(_store);
   return _store;
 }
 

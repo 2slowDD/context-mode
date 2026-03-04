@@ -12,6 +12,51 @@ I genuinely love open source and I'm grateful to have you here. Don't hesitate t
 
 This guide covers the local development workflow so you can test changes in a live Claude Code session before submitting a PR.
 
+## Architecture Overview
+
+context-mode is a monorepo with three packages:
+
+```
+packages/
+  shared/    → SQLite base class, types, truncation utils (imported by core + session)
+  core/      → MCP server, executor, store, security, runtime, CLI (builds to build/)
+  session/   → Session event DB, snapshot builder, extractors (builds to packages/session/dist/)
+hooks/       → Plain JS hooks (.mjs) — loaded fresh on each invocation, no build needed
+```
+
+**Build output is flat**: `packages/core/src/server.ts` compiles to `build/server.js` (not `build/core/server.js`). This is intentional — `start.mjs` expects `build/server.js` at the repo root.
+
+> **Critical for local dev:** `start.mjs` loads `server.bundle.mjs` (CI-built) over `build/server.js` if the bundle exists (line 79). **Delete `server.bundle.mjs` in your local clone** or your `build/server.js` changes will never be loaded:
+> ```bash
+> rm server.bundle.mjs  # forces start.mjs to use build/server.js
+> ```
+> The bundle is committed by CI for production — don't gitignore it, just delete it locally.
+
+### Session Continuity Architecture
+
+Session events flow through a two-database system:
+
+1. **SessionDB** (persistent, per-project): `~/.claude/context-mode/sessions/<hash>.db`
+   - PostToolUse hook captures events in real-time
+   - PreCompact hook builds resume snapshots
+   - UserPromptSubmit hook captures user prompts
+
+2. **ContentStore** (ephemeral, per-process): `/tmp/context-mode-<PID>.db`
+   - FTS5 full-text search index for tool outputs
+   - Auto-indexes session events file written by SessionStart hook
+   - Dies when MCP server process exits
+
+**Session restore flow** (compact/resume):
+```
+SessionStart hook → reads SessionDB → writes events as markdown file
+                  → injects ~275 token directive (summary + search queries)
+MCP server        → detects markdown file on next getStore() call
+                  → auto-indexes into FTS5 → deletes file
+LLM               → searches source:"session-events" for details on demand
+```
+
+Raw session events are **never injected into context**. Only a compact summary table + search queries are injected. The LLM searches for details via the existing `search()` MCP tool.
+
 ## Prerequisites
 
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed
@@ -26,8 +71,10 @@ This guide covers the local development workflow so you can test changes in a li
 git clone https://github.com/mksglu/claude-context-mode.git
 cd claude-context-mode
 npm install
-npm run build
+npm run build  # produces build/, packages/shared/dist/, packages/session/dist/
 ```
+
+> **Critical:** `npm run build` must succeed before testing. It uses `tsc -b` (project references) to build all three packages in dependency order: shared → core → session. If `packages/session/dist/` or `packages/shared/dist/` are missing, session continuity hooks will fail with `SessionStart hook error`.
 
 ### 2. Symlink the cache to your local clone
 
@@ -56,9 +103,11 @@ Replace `/path/to/your/clone/claude-context-mode` with your actual local path.
 
 > **Why symlink?** The plugin system overwrites `installed_plugins.json` on every session start, reverting any manual path changes. A symlink lets the plugin system keep its managed path while the actual code resolves to your local clone.
 
+> **Critical:** The symlink must point to the root of your clone (where `hooks/`, `build/`, and `packages/` all live). Hooks registered in `hooks.json` use `${CLAUDE_PLUGIN_ROOT}` which resolves to this directory.
+
 ### 3. Update PreToolUse hook in settings
 
-The symlink in step 2 ensures `hooks.json` (which registers PostToolUse, PreCompact, and SessionStart) resolves to your local clone via the plugin system. You only need to override PreToolUse in `~/.claude/settings.json` since its broader matcher is needed for dev mode:
+The symlink in step 2 ensures `hooks.json` (which registers PostToolUse, PreCompact, SessionStart, and UserPromptSubmit) resolves to your local clone via the plugin system. You only need to override PreToolUse in `~/.claude/settings.json` since its broader matcher is needed for dev mode:
 
 ```json
 {
@@ -80,7 +129,7 @@ The symlink in step 2 ensures `hooks.json` (which registers PostToolUse, PreComp
 
 Replace `/path/to/your/clone/claude-context-mode` with your actual local path.
 
-> **Important:** Do NOT add PostToolUse, PreCompact, or SessionStart to `settings.json` — they are already registered in `hooks.json` and the symlink makes them resolve to your local clone. Adding them to both causes double invocations, split session IDs, and SQLite locking errors.
+> **Important:** Do NOT add PostToolUse, PreCompact, SessionStart, or UserPromptSubmit to `settings.json` — they are already registered in `hooks.json` and the symlink makes them resolve to your local clone. Adding them to both causes double invocations, split session IDs, and SQLite locking errors.
 
 ### 4. Bump the version for verification
 
@@ -88,7 +137,7 @@ Change the version in your local clone to something recognizable:
 
 ```bash
 # In package.json: "version": "0.9.22-dev"
-# In src/server.ts: const VERSION = "0.9.22-dev";
+# In packages/core/src/server.ts: const VERSION = "0.9.22-dev";
 ```
 
 Then rebuild:
@@ -138,7 +187,7 @@ Then revert hooks in `~/.claude/settings.json` and restart Claude Code.
 ### Build and test your changes
 
 ```bash
-# TypeScript compilation
+# TypeScript compilation (project references: shared → core → session)
 npm run build
 
 # Run all tests (parallel via Vitest)
@@ -151,15 +200,33 @@ npm run typecheck
 npm run test:watch
 ```
 
-### See changes in Claude Code
+### What needs rebuild?
 
-After modifying source code:
+| Changed | Rebuild needed? | Why |
+|---------|:-:|---|
+| `hooks/*.mjs` | No | Plain JS, loaded fresh each invocation |
+| `packages/core/src/*` | Yes | Compiles to `build/` (MCP server, executor, store) |
+| `packages/shared/src/*` | Yes | Compiles to `packages/shared/dist/`, imported by core + session |
+| `packages/session/src/*` | Yes | Compiles to `packages/session/dist/`, imported by hooks |
 
-```bash
-npm run build
-```
+After rebuilding, restart your Claude Code session. The MCP server reloads on session start.
 
-Then restart your Claude Code session. The MCP server reloads on session start.
+> **Tip:** If you only changed hook files (`hooks/*.mjs`), just restart Claude Code — no rebuild needed. Hooks are plain JS loaded fresh on each invocation.
+
+### Key files to know
+
+| File | Purpose |
+|---|---|
+| `packages/core/src/server.ts` | MCP server, tool handlers, auto-indexing of session events |
+| `packages/core/src/store.ts` | FTS5 content store (index, search, chunking) |
+| `packages/core/src/executor.ts` | Polyglot code executor (JS, Python, Shell, etc.) |
+| `packages/session/src/db.ts` | SessionDB — persistent session event storage |
+| `packages/session/src/extract.ts` | Event extractors for PostToolUse hook |
+| `hooks/sessionstart.mjs` | Session lifecycle (startup/compact/resume/clear) |
+| `hooks/posttooluse.mjs` | Real-time event capture from tool calls |
+| `hooks/precompact.mjs` | Resume snapshot builder (fires before compact) |
+| `hooks/pretooluse.mjs` | Tool routing + context window protection |
+| `hooks/session-helpers.mjs` | Shared utilities (stdin reader, session ID, DB paths) |
 
 ## TDD Workflow
 

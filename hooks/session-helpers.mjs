@@ -48,3 +48,16 @@ export function getSessionDBPath() {
   mkdirSync(dir, { recursive: true });
   return join(dir, `${hash}.db`);
 }
+
+/**
+ * Return the per-project session events file path.
+ * Used by sessionstart hook (write) and MCP server (read + auto-index).
+ * Path: ~/.claude/context-mode/sessions/<SHA256(CLAUDE_PROJECT_DIR)[:16]>-events.md
+ */
+export function getSessionEventsPath() {
+  const projectDir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+  const hash = createHash("sha256").update(projectDir).digest("hex").slice(0, 16);
+  const dir = join(homedir(), ".claude", "context-mode", "sessions");
+  mkdirSync(dir, { recursive: true });
+  return join(dir, `${hash}-events.md`);
+}

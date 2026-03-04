@@ -88,7 +88,7 @@ function extractFileAndRule(input: HookInput): SessionEvent[] {
         events.push({
           type: "rule_content",
           category: "rule",
-          data: truncate(tool_response, 500),
+          data: truncate(tool_response, 5000),
           priority: 1,
         });
       }

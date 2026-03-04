@@ -14,78 +14,190 @@
  */
 
 import { ROUTING_BLOCK } from "./routing-block.mjs";
-import { readStdin, getSessionId, getSessionDBPath } from "./session-helpers.mjs";
+import { readStdin, getSessionId, getSessionDBPath, getSessionEventsPath } from "./session-helpers.mjs";
 import { join } from "node:path";
+import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { homedir } from "node:os";
 
 // Resolve absolute path for imports
 const HOOK_DIR = new URL(".", import.meta.url).pathname;
 const PKG_SESSION = join(HOOK_DIR, "..", "packages", "session", "dist");
 
-const raw = await readStdin();
 let additionalContext = ROUTING_BLOCK;
 
 try {
+  const raw = await readStdin();
   const input = JSON.parse(raw);
   const source = input.source ?? "startup";
 
-  // ── Helper: build structured session knowledge injection for the LLM ──
-  // The LLM doesn't care about counts — it cares about WHAT data was preserved.
-  // ZERO truncation: full event data flows through. The LLM indexes it into
-  // context-mode for persistent searchable access across compacts.
-  function buildSessionKnowledge(source, events, snapshot, stats) {
-    const isCompact = source === "compact";
-
-    // ── Group events by category — no truncation, no limits ──
+  // ── Helper: group events and extract metadata ──
+  function groupEvents(events) {
     const grouped = {};
     let lastPrompt = "";
-
     for (const ev of events) {
       if (ev.category === "prompt") {
-        // Always keep the most recent user prompt
         lastPrompt = ev.data;
         continue;
       }
       if (!grouped[ev.category]) grouped[ev.category] = [];
       grouped[ev.category].push(ev);
     }
-
-    // ── Deduplicate file basenames for quick reference ──
     const fileNames = new Set();
     for (const ev of (grouped.file || [])) {
       const path = ev.data.includes(" in ") ? ev.data.split(" in ").pop() : ev.data;
       const base = path?.split("/").pop()?.trim();
       if (base && !base.includes("*")) fileNames.add(base);
     }
+    return { grouped, lastPrompt, fileNames };
+  }
 
-    let block = `\n<session_knowledge source="${isCompact ? "compact" : "continue"}" events="${events.length}">`;
+  // ── Write session events as markdown to disk for MCP server auto-indexing ──
+  // Structured with H2 headings per category — optimal for FTS5 chunking.
+  // The MCP server's getStore() detects this file and indexes it automatically.
+  function writeSessionEventsFile(events, stats) {
+    const eventsPath = getSessionEventsPath();
+    const { grouped, lastPrompt, fileNames } = groupEvents(events);
 
-    // ── Behavioral directives ──
-    block += `\n  <behavioral_directives>`;
-    // ── Build marketing summary lines from actual data ──
-    const summaryLines = [];
-    if (fileNames.size > 0) summaryLines.push(`${fileNames.size} files tracked (${[...fileNames].slice(0, 5).join(", ")}${fileNames.size > 5 ? "..." : ""})`);
-    if (grouped.rule?.length > 0) summaryLines.push(`CLAUDE.md rules preserved`);
-    if (grouped.decision?.length > 0) summaryLines.push(`${grouped.decision.length} user decision(s) remembered`);
-    if (grouped.task?.length > 0) summaryLines.push(`${grouped.task.length} task(s) in progress`);
-    if (grouped.git?.length > 0) summaryLines.push(`git state tracked`);
-    if (grouped.error?.length > 0) summaryLines.push(`${grouped.error.length} error(s) logged`);
-    if (lastPrompt) summaryLines.push(`last request preserved`);
+    const lines = [];
+    lines.push("# Session Resume");
+    lines.push("");
+    lines.push(`Events: ${events.length} | Timestamp: ${new Date().toISOString()}`);
+    lines.push("");
 
-    if (isCompact) {
-      block += `\n    Your context was compacted. The data below is your prior session state, preserved by context-mode.`;
-      block += `\n    IMPORTANT: This data IS your memory. Treat it as ground truth for this session.`;
-      block += `\n    MANDATORY FIRST ACTION: Index the <session_events> block below into context-mode for persistent searchable access:`;
-      block += `\n      mcp__plugin_context-mode_context-mode__index(source: "session-resume", content: <session_events content>)`;
-      block += `\n    Then continue the user's last request.`;
-    } else {
-      // source === "resume" (--continue)
-      block += `\n    Previous session knowledge loaded via --continue, preserved by context-mode.`;
-      block += `\n    Use as context. Verify file state before editing.`;
-      block += `\n    RECOMMENDED: Index the <session_events> block into context-mode for searchable access:`;
-      block += `\n      mcp__plugin_context-mode_context-mode__index(source: "previous-session", content: <session_events content>)`;
+    if (fileNames.size > 0) {
+      lines.push("## Active Files");
+      lines.push("");
+      for (const name of fileNames) lines.push(`- ${name}`);
+      lines.push("");
     }
 
-    // ── User-facing summary — LLM MUST display this table ──
+    if (grouped.rule?.length > 0) {
+      lines.push("## Project Rules");
+      lines.push("");
+      for (const ev of grouped.rule) {
+        if (ev.type === "rule_content") {
+          // Downgrade headings so they nest under ## Project Rules
+          // H1 → H4, H2 → H5, H3 → H6 (prevents FTS5 chunk hierarchy breakage)
+          const downgraded = ev.data.replace(/^(#{1,3}) /gm, (_, hashes) => "#".repeat(hashes.length + 3) + " ");
+          lines.push(downgraded);
+          lines.push("");
+        } else {
+          lines.push(`- ${ev.data}`);
+        }
+      }
+      lines.push("");
+    }
+
+    if (grouped.task?.length > 0) {
+      lines.push("## Tasks In Progress");
+      lines.push("");
+      for (const ev of grouped.task) lines.push(`- ${ev.data}`);
+      lines.push("");
+    }
+
+    if (grouped.decision?.length > 0) {
+      lines.push("## User Decisions");
+      lines.push("");
+      for (const ev of grouped.decision) lines.push(`- ${ev.data}`);
+      lines.push("");
+    }
+
+    if (grouped.git?.length > 0) {
+      lines.push("## Git Operations");
+      lines.push("");
+      for (const ev of grouped.git) lines.push(`- ${ev.data}`);
+      lines.push("");
+    }
+
+    if (grouped.env?.length > 0 || grouped.cwd?.length > 0) {
+      lines.push("## Environment");
+      lines.push("");
+      if (grouped.cwd?.length > 0) {
+        lines.push(`- cwd: ${grouped.cwd[grouped.cwd.length - 1].data}`);
+      }
+      for (const ev of (grouped.env || [])) lines.push(`- ${ev.data}`);
+      lines.push("");
+    }
+
+    if (grouped.error?.length > 0) {
+      lines.push("## Errors Encountered");
+      lines.push("");
+      for (const ev of grouped.error) lines.push(`- ${ev.data}`);
+      lines.push("");
+    }
+
+    if (grouped.mcp?.length > 0) {
+      const toolCounts = {};
+      for (const ev of grouped.mcp) {
+        const tool = ev.data.split(":")[0].trim();
+        toolCounts[tool] = (toolCounts[tool] || 0) + 1;
+      }
+      lines.push("## MCP Tool Usage");
+      lines.push("");
+      for (const [tool, count] of Object.entries(toolCounts)) {
+        lines.push(`- ${tool}: ${count} calls`);
+      }
+      lines.push("");
+    }
+
+    if (grouped.subagent?.length > 0) {
+      lines.push("## Subagent Tasks");
+      lines.push("");
+      for (const ev of grouped.subagent) lines.push(`- ${ev.data}`);
+      lines.push("");
+    }
+
+    if (grouped.skill?.length > 0) {
+      const uniqueSkills = new Set(grouped.skill.map(e => e.data));
+      lines.push("## Active Skills");
+      lines.push("");
+      lines.push(`- ${[...uniqueSkills].join(", ")}`);
+      lines.push("");
+    }
+
+    if (grouped.intent?.length > 0) {
+      lines.push("## Session Intent");
+      lines.push("");
+      lines.push(`- ${grouped.intent[grouped.intent.length - 1].data}`);
+      lines.push("");
+    }
+
+    if (grouped.role?.length > 0) {
+      lines.push("## User Role");
+      lines.push("");
+      lines.push(`- ${grouped.role[grouped.role.length - 1].data}`);
+      lines.push("");
+    }
+
+    if (grouped.data?.length > 0) {
+      lines.push("## Data References");
+      lines.push("");
+      for (const ev of grouped.data) lines.push(`- ${ev.data}`);
+      lines.push("");
+    }
+
+    if (lastPrompt) {
+      lines.push("## Last User Prompt");
+      lines.push("");
+      lines.push(lastPrompt);
+      lines.push("");
+    }
+
+    writeFileSync(eventsPath, lines.join("\n"), "utf-8");
+    return { grouped, lastPrompt, fileNames };
+  }
+
+  // ── Build compact directive — summary table + search queries only ──
+  // Raw event data is NOT injected. It's in the markdown file for FTS5 auto-indexing.
+  function buildSessionDirective(source, eventMeta) {
+    const { grouped, lastPrompt, fileNames } = eventMeta;
+    const isCompact = source === "compact";
+
+    let block = `\n<session_knowledge source="${isCompact ? "compact" : "continue"}" indexed="true">`;
+
+    block += `\n  <status>Session events pre-indexed into context-mode (source: "session-events"). Raw data is searchable — do NOT call index().</status>`;
+
+    // ── Summary table — LLM MUST display this ──
     const tableRows = [];
     if (fileNames.size > 0) {
       const preview = [...fileNames].slice(0, 5).join(", ");
@@ -97,20 +209,17 @@ try {
     }
     if (grouped.decision?.length > 0) {
       const dPreview = grouped.decision.slice(0, 2).map(e => e.data.substring(0, 50)).join("; ");
-      tableRows.push(`| Your decisions | ${grouped.decision.length} | ${dPreview} |`);
+      tableRows.push(`| Decisions | ${grouped.decision.length} | ${dPreview} |`);
     }
     if (grouped.task?.length > 0) {
-      tableRows.push(`| Tasks in progress | ${grouped.task.length} | Continuing where you left off |`);
+      tableRows.push(`| Tasks | ${grouped.task.length} | In progress |`);
     }
     if (grouped.git?.length > 0) {
       const ops = [...new Set(grouped.git.map(e => e.data))].slice(0, 3).join(", ");
       tableRows.push(`| Git state | ${grouped.git.length} | ${ops} |`);
     }
     if (grouped.error?.length > 0) {
-      tableRows.push(`| Errors caught | ${grouped.error.length} | Being monitored |`);
-    }
-    if (grouped.env?.length > 0) {
-      tableRows.push(`| Environment | ${grouped.env.length} | Setup preserved |`);
+      tableRows.push(`| Errors | ${grouped.error.length} | Monitored |`);
     }
     if (lastPrompt) {
       const promptPreview = lastPrompt.length > 60 ? lastPrompt.substring(0, 57) + "..." : lastPrompt;
@@ -118,7 +227,8 @@ try {
     }
 
     if (tableRows.length > 0) {
-      block += `\n    DISPLAY TO USER: Before doing anything else, show this status table to the user exactly as formatted:`;
+      block += `\n  <display_table>`;
+      block += `\n    MANDATORY OUTPUT — Display this table as your FIRST output:`;
       block += `\n    ---`;
       block += `\n    **context-mode** — session ${isCompact ? "restored" : "loaded"}`;
       block += `\n    `;
@@ -129,164 +239,47 @@ try {
       }
       if (isCompact) {
         block += `\n    `;
-        block += `\n    *Context was compacted — all session knowledge restored. Continuing seamlessly.*`;
+        block += `\n    *Context compacted — session knowledge restored.*`;
       } else {
         block += `\n    `;
-        block += `\n    *Previous session loaded via --continue. Session knowledge preserved by context-mode.*`;
+        block += `\n    *Previous session loaded via --continue.*`;
       }
       block += `\n    ---`;
+      block += `\n  </display_table>`;
     }
-    block += `\n  </behavioral_directives>`;
 
-    // ── Last user prompt — the LLM must continue from here ──
+    // ── Last user prompt — always in context (critical for compact) ──
     if (lastPrompt) {
-      block += `\n  <last_user_prompt>`;
-      block += `\n    ${lastPrompt}`;
-      block += `\n  </last_user_prompt>`;
+      block += `\n  <last_user_prompt>${lastPrompt}</last_user_prompt>`;
       if (isCompact) {
         block += `\n  <continue_from>Continue working on the request above. Do NOT ask the user to repeat themselves.</continue_from>`;
       }
     }
 
-    // ── Full session events grouped by category — ZERO truncation ──
-    block += `\n  <session_events>`;
+    // ── Mandatory search — LLM must restore working memory from FTS5 ──
+    const queries = [];
+    if (fileNames.size > 0) queries.push("active files tracked");
+    if (grouped.task?.length > 0) queries.push("tasks in progress");
+    if (grouped.decision?.length > 0) queries.push("user decisions preferences");
+    if (grouped.rule?.length > 0) queries.push("project rules CLAUDE.md");
+    if (grouped.git?.length > 0) queries.push("git operations branch commit");
+    if (grouped.error?.length > 0) queries.push("errors encountered");
+    if (!queries.length) queries.push("session resume overview");
 
-    // Files (P1)
-    if (fileNames.size > 0) {
-      block += `\n    <active_files>`;
-      for (const name of fileNames) {
-        block += `\n      <file>${name}</file>`;
-      }
-      block += `\n    </active_files>`;
-    }
-
-    // Rules + content (P1)
-    if (grouped.rule?.length > 0) {
-      block += `\n    <rules>`;
-      for (const ev of grouped.rule) {
-        if (ev.type === "rule_content") {
-          block += `\n      <rule_content>${ev.data}</rule_content>`;
-        } else {
-          block += `\n      <rule_path>${ev.data}</rule_path>`;
-        }
-      }
-      block += `\n    </rules>`;
-    }
-
-    // Tasks (P1)
-    if (grouped.task?.length > 0) {
-      block += `\n    <tasks>`;
-      for (const ev of grouped.task) {
-        block += `\n      <task>${ev.data}</task>`;
-      }
-      block += `\n    </tasks>`;
-    }
-
-    // Decisions (P2)
-    if (grouped.decision?.length > 0) {
-      block += `\n    <decisions>`;
-      for (const ev of grouped.decision) {
-        block += `\n      <decision>${ev.data}</decision>`;
-      }
-      block += `\n    </decisions>`;
-    }
-
-    // Git (P2)
-    if (grouped.git?.length > 0) {
-      block += `\n    <git_operations>`;
-      for (const ev of grouped.git) {
-        block += `\n      <op>${ev.data}</op>`;
-      }
-      block += `\n    </git_operations>`;
-    }
-
-    // Environment (P2)
-    if (grouped.env?.length > 0) {
-      block += `\n    <environment>`;
-      for (const ev of grouped.env) {
-        block += `\n      <env>${ev.data}</env>`;
-      }
-      block += `\n    </environment>`;
-    }
-
-    // Working directory (P2)
-    if (grouped.cwd?.length > 0) {
-      const lastCwd = grouped.cwd[grouped.cwd.length - 1];
-      block += `\n    <cwd>${lastCwd.data}</cwd>`;
-    }
-
-    // Errors (P2)
-    if (grouped.error?.length > 0) {
-      block += `\n    <errors>`;
-      for (const ev of grouped.error) {
-        block += `\n      <error>${ev.data}</error>`;
-      }
-      block += `\n    </errors>`;
-    }
-
-    // MCP tools (P3)
-    if (grouped.mcp?.length > 0) {
-      const toolCounts = {};
-      for (const ev of grouped.mcp) {
-        const tool = ev.data.split(":")[0].trim();
-        toolCounts[tool] = (toolCounts[tool] || 0) + 1;
-      }
-      block += `\n    <mcp_tools>`;
-      for (const [tool, count] of Object.entries(toolCounts)) {
-        block += `\n      <tool name="${tool}" calls="${count}" />`;
-      }
-      block += `\n    </mcp_tools>`;
-    }
-
-    // Subagents (P3)
-    if (grouped.subagent?.length > 0) {
-      block += `\n    <subagents>`;
-      for (const ev of grouped.subagent) {
-        block += `\n      <task>${ev.data}</task>`;
-      }
-      block += `\n    </subagents>`;
-    }
-
-    // Skills (P3)
-    if (grouped.skill?.length > 0) {
-      const uniqueSkills = new Set(grouped.skill.map(e => e.data));
-      block += `\n    <skills>${[...uniqueSkills].join(", ")}</skills>`;
-    }
-
-    // Intent (P3)
-    if (grouped.intent?.length > 0) {
-      const lastIntent = grouped.intent[grouped.intent.length - 1];
-      block += `\n    <intent>${lastIntent.data}</intent>`;
-    }
-
-    // Role (P3)
-    if (grouped.role?.length > 0) {
-      const lastRole = grouped.role[grouped.role.length - 1];
-      block += `\n    <role>${lastRole.data}</role>`;
-    }
-
-    // User data references (P4)
-    if (grouped.data?.length > 0) {
-      block += `\n    <data_refs>`;
-      for (const ev of grouped.data) {
-        block += `\n      <ref>${ev.data}</ref>`;
-      }
-      block += `\n    </data_refs>`;
-    }
-
-    block += `\n  </session_events>`;
-
-    // ── Session metadata ──
-    if (stats?.compact_count > 0) {
-      block += `\n  <session_meta compact_count="${stats.compact_count}" />`;
-    }
+    block += `\n  <mandatory_actions>`;
+    block += `\n    BEFORE doing anything else:`;
+    block += `\n    1. Display the summary table to the user.`;
+    block += `\n    2. Restore working memory — search session events:`;
+    block += `\n       mcp__plugin_context-mode_context-mode__search(queries: ${JSON.stringify(queries)}, source: "session-events")`;
+    block += `\n    3. Then continue the user's last request.`;
+    block += `\n  </mandatory_actions>`;
 
     block += `\n</session_knowledge>`;
     return block;
   }
 
   if (source === "compact") {
-    // Session was compacted — inject structured resume context
+    // Session was compacted — write events to file for auto-indexing, inject directive only
     const { SessionDB } = await import(join(PKG_SESSION, "db.js"));
     const dbPath = getSessionDBPath();
     const db = new SessionDB({ dbPath });
@@ -295,21 +288,19 @@ try {
     const stats = db.getSessionStats(sessionId);
     const events = db.getEvents(sessionId);
 
-    let snapshot = null;
     if (resume && !resume.consumed) {
-      snapshot = resume.snapshot;
       db.markResumeConsumed(sessionId);
     }
 
     if (events.length > 0) {
-      additionalContext += buildSessionKnowledge("compact", events, snapshot, stats);
+      const eventMeta = writeSessionEventsFile(events, stats);
+      additionalContext += buildSessionDirective("compact", eventMeta);
     }
 
     db.close();
   } else if (source === "resume") {
-    // User used --continue — inject previous session knowledge
+    // User used --continue — write previous session events to file, inject directive only
     const { SessionDB } = await import(join(PKG_SESSION, "db.js"));
-    const { buildResumeSnapshot } = await import(join(PKG_SESSION, "snapshot.js"));
     const dbPath = getSessionDBPath();
     const db = new SessionDB({ dbPath });
 
@@ -326,28 +317,54 @@ try {
       const events = db.getEvents(prevId);
 
       if (events.length > 0) {
-        const resume = db.getResume(prevId);
-        const snapshot = resume?.snapshot || buildResumeSnapshot(events, {
-          compactCount: recentSession.compact_count ?? 0,
-        });
-        const stats = db.getSessionStats(prevId);
-
-        additionalContext += buildSessionKnowledge("resume", events, snapshot, stats);
+        const eventMeta = writeSessionEventsFile(events, db.getSessionStats(prevId));
+        additionalContext += buildSessionDirective("resume", eventMeta);
       }
     }
 
     db.close();
   } else if (source === "startup") {
-    // Fresh session (no --continue) — clean slate, no injection.
+    // Fresh session (no --continue) — clean slate, capture CLAUDE.md rules.
     const { SessionDB } = await import(join(PKG_SESSION, "db.js"));
     const dbPath = getSessionDBPath();
     const db = new SessionDB({ dbPath });
+    try { unlinkSync(getSessionEventsPath()); } catch { /* no stale file */ }
     db.cleanupOldSessions();
+
+    // Proactively capture CLAUDE.md files — Claude Code loads them as system
+    // context at startup, invisible to PostToolUse hooks. We read them from
+    // disk so they survive compact/resume via the session events pipeline.
+    const sessionId = getSessionId(input);
+    const projectDir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+    const claudeMdPaths = [
+      join(homedir(), ".claude", "CLAUDE.md"),
+      join(projectDir, "CLAUDE.md"),
+      join(projectDir, ".claude", "CLAUDE.md"),
+    ];
+    for (const p of claudeMdPaths) {
+      try {
+        const content = readFileSync(p, "utf-8");
+        if (content.trim()) {
+          db.insertEvent(sessionId, { type: "rule", category: "rule", data: p, priority: 1 });
+          db.insertEvent(sessionId, { type: "rule_content", category: "rule", data: content, priority: 1 });
+        }
+      } catch { /* file doesn't exist — skip */ }
+    }
+
     db.close();
   }
   // "clear" — no action needed
-} catch {
+} catch (err) {
   // Session continuity is best-effort — never block session start
+  try {
+    const { appendFileSync } = await import("node:fs");
+    const { join: pjoin } = await import("node:path");
+    const { homedir } = await import("node:os");
+    appendFileSync(
+      pjoin(homedir(), ".claude", "context-mode", "sessionstart-debug.log"),
+      `[${new Date().toISOString()}] ${err?.message || err}\n${err?.stack || ""}\n`,
+    );
+  } catch { /* ignore logging failure */ }
 }
 
 console.log(JSON.stringify({
