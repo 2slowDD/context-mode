@@ -139,6 +139,18 @@ export function routePreToolUse(toolName, toolInput, projectDir) {
       };
     }
 
+    // Build tools (gradle, maven) → redirect to execute sandbox (Issue #38).
+    // These produce extremely verbose output that should stay in sandbox.
+    if (/(^|\s|&&|\||\;)(\.\/gradlew|gradlew|gradle|\.\/mvnw|mvnw|mvn)\s/i.test(stripped)) {
+      const safeCmd = command.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      return {
+        action: "modify",
+        updatedInput: {
+          command: `echo "context-mode: Build tool redirected to sandbox. Use mcp__plugin_context-mode_context-mode__ctx_execute(language: \\"shell\\", code: \\"${safeCmd}\\") to run this command. Do NOT retry with Bash."`,
+        },
+      };
+    }
+
     // allow all other Bash commands, but inject routing nudge
     return { action: "context", additionalContext: BASH_GUIDANCE };
   }

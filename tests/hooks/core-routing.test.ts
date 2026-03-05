@@ -95,6 +95,50 @@ describe("routePreToolUse", () => {
       expect(result).not.toBeNull();
       expect(result!.action).toBe("context");
     });
+
+    it("redirects ./gradlew build to execute sandbox", () => {
+      const result = routePreToolUse("Bash", {
+        command: "./gradlew build",
+      });
+      expect(result).not.toBeNull();
+      expect(result!.action).toBe("modify");
+      expect((result!.updatedInput as Record<string, string>).command).toContain(
+        "Build tool redirected",
+      );
+    });
+
+    it("redirects gradle test to execute sandbox", () => {
+      const result = routePreToolUse("Bash", {
+        command: "gradle test --info",
+      });
+      expect(result).not.toBeNull();
+      expect(result!.action).toBe("modify");
+    });
+
+    it("redirects mvn package to execute sandbox", () => {
+      const result = routePreToolUse("Bash", {
+        command: "mvn clean package -DskipTests",
+      });
+      expect(result).not.toBeNull();
+      expect(result!.action).toBe("modify");
+    });
+
+    it("redirects ./mvnw verify to execute sandbox", () => {
+      const result = routePreToolUse("Bash", {
+        command: "./mvnw verify",
+      });
+      expect(result).not.toBeNull();
+      expect(result!.action).toBe("modify");
+    });
+
+    it("does not false-positive on gradle in quoted text", () => {
+      const result = routePreToolUse("Bash", {
+        command: 'echo "run gradle build to compile"',
+      });
+      expect(result).not.toBeNull();
+      // stripped version removes quoted content → no gradle match → context
+      expect(result!.action).toBe("context");
+    });
   });
 
   // ─── Read routing ──────────────────────────────────────
