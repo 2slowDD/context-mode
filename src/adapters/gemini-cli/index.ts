@@ -69,6 +69,8 @@ interface GeminiCLIHookInput {
 import {
   HOOK_TYPES as GEMINI_HOOK_NAMES,
   HOOK_SCRIPTS as GEMINI_HOOK_SCRIPTS,
+  buildHookCommand as buildGeminiHookCommand,
+  type HookType as GeminiHookType,
 } from "./hooks.js";
 
 // ─────────────────────────────────────────────────────────
@@ -241,7 +243,7 @@ export class GeminiCLIAdapter implements HookAdapter {
     return join(this.getSessionDir(), `${hash}-events.md`);
   }
 
-  generateHookConfig(_pluginRoot: string): HookRegistration {
+  generateHookConfig(pluginRoot: string): HookRegistration {
     return {
       [GEMINI_HOOK_NAMES.BEFORE_TOOL]: [
         {
@@ -249,7 +251,7 @@ export class GeminiCLIAdapter implements HookAdapter {
           hooks: [
             {
               type: "command",
-              command: `context-mode hook gemini-cli ${GEMINI_HOOK_NAMES.BEFORE_TOOL.toLowerCase()}`,
+              command: buildGeminiHookCommand(GEMINI_HOOK_NAMES.BEFORE_TOOL, pluginRoot),
             },
           ],
         },
@@ -260,7 +262,7 @@ export class GeminiCLIAdapter implements HookAdapter {
           hooks: [
             {
               type: "command",
-              command: `context-mode hook gemini-cli ${GEMINI_HOOK_NAMES.AFTER_TOOL.toLowerCase()}`,
+              command: buildGeminiHookCommand(GEMINI_HOOK_NAMES.AFTER_TOOL, pluginRoot),
             },
           ],
         },
@@ -271,7 +273,7 @@ export class GeminiCLIAdapter implements HookAdapter {
           hooks: [
             {
               type: "command",
-              command: `context-mode hook gemini-cli ${GEMINI_HOOK_NAMES.PRE_COMPRESS.toLowerCase()}`,
+              command: buildGeminiHookCommand(GEMINI_HOOK_NAMES.PRE_COMPRESS, pluginRoot),
             },
           ],
         },
@@ -282,7 +284,7 @@ export class GeminiCLIAdapter implements HookAdapter {
           hooks: [
             {
               type: "command",
-              command: `context-mode hook gemini-cli ${GEMINI_HOOK_NAMES.SESSION_START.toLowerCase()}`,
+              command: buildGeminiHookCommand(GEMINI_HOOK_NAMES.SESSION_START, pluginRoot),
             },
           ],
         },
@@ -440,7 +442,7 @@ export class GeminiCLIAdapter implements HookAdapter {
 
   // ── Upgrade ────────────────────────────────────────────
 
-  configureAllHooks(_pluginRoot: string): string[] {
+  configureAllHooks(pluginRoot: string): string[] {
     const settings = this.readSettings() ?? {};
     const hooks = (settings.hooks ?? {}) as Record<string, unknown>;
     const changes: string[] = [];
@@ -453,7 +455,7 @@ export class GeminiCLIAdapter implements HookAdapter {
     ];
 
     for (const config of hookConfigs) {
-      const command = `context-mode hook gemini-cli ${config.name.toLowerCase()}`;
+      const command = buildGeminiHookCommand(config.name as GeminiHookType, pluginRoot);
       const entry = {
         matcher: "",
         hooks: [{ type: "command", command }],

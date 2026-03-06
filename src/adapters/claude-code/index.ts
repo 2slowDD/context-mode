@@ -482,7 +482,7 @@ export class ClaudeCodeAdapter implements HookAdapter {
     ];
 
     for (const hookType of hookTypes) {
-      const command = buildHookCommand(hookType);
+      const command = buildHookCommand(hookType, pluginRoot);
 
       if (hookType === HOOK_TYPES.PRE_TOOL_USE) {
         const entry = {

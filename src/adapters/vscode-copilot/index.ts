@@ -74,6 +74,8 @@ interface VSCodeCopilotHookInput {
 import {
   HOOK_TYPES as VSCODE_HOOK_NAMES,
   HOOK_SCRIPTS as VSCODE_HOOK_SCRIPTS,
+  buildHookCommand as buildVSCodeHookCommand,
+  type HookType as VSCodeHookType,
 } from "./hooks.js";
 
 // ─────────────────────────────────────────────────────────
@@ -266,7 +268,7 @@ export class VSCodeCopilotAdapter implements HookAdapter {
     return join(this.getSessionDir(), `${hash}-events.md`);
   }
 
-  generateHookConfig(_pluginRoot: string): HookRegistration {
+  generateHookConfig(pluginRoot: string): HookRegistration {
     return {
       [VSCODE_HOOK_NAMES.PRE_TOOL_USE]: [
         {
@@ -274,7 +276,7 @@ export class VSCodeCopilotAdapter implements HookAdapter {
           hooks: [
             {
               type: "command",
-              command: `context-mode hook vscode-copilot ${VSCODE_HOOK_NAMES.PRE_TOOL_USE.toLowerCase()}`,
+              command: buildVSCodeHookCommand(VSCODE_HOOK_NAMES.PRE_TOOL_USE, pluginRoot),
             },
           ],
         },
@@ -285,7 +287,7 @@ export class VSCodeCopilotAdapter implements HookAdapter {
           hooks: [
             {
               type: "command",
-              command: `context-mode hook vscode-copilot ${VSCODE_HOOK_NAMES.POST_TOOL_USE.toLowerCase()}`,
+              command: buildVSCodeHookCommand(VSCODE_HOOK_NAMES.POST_TOOL_USE, pluginRoot),
             },
           ],
         },
@@ -296,7 +298,7 @@ export class VSCodeCopilotAdapter implements HookAdapter {
           hooks: [
             {
               type: "command",
-              command: `context-mode hook vscode-copilot ${VSCODE_HOOK_NAMES.PRE_COMPACT.toLowerCase()}`,
+              command: buildVSCodeHookCommand(VSCODE_HOOK_NAMES.PRE_COMPACT, pluginRoot),
             },
           ],
         },
@@ -307,7 +309,7 @@ export class VSCodeCopilotAdapter implements HookAdapter {
           hooks: [
             {
               type: "command",
-              command: `context-mode hook vscode-copilot ${VSCODE_HOOK_NAMES.SESSION_START.toLowerCase()}`,
+              command: buildVSCodeHookCommand(VSCODE_HOOK_NAMES.SESSION_START, pluginRoot),
             },
           ],
         },
@@ -498,7 +500,7 @@ export class VSCodeCopilotAdapter implements HookAdapter {
 
   // ── Upgrade ────────────────────────────────────────────
 
-  configureAllHooks(_pluginRoot: string): string[] {
+  configureAllHooks(pluginRoot: string): string[] {
     const changes: string[] = [];
     const hookConfig: Record<string, unknown> = { hooks: {} };
     const hooks = hookConfig.hooks as Record<string, unknown>;
@@ -520,7 +522,7 @@ export class VSCodeCopilotAdapter implements HookAdapter {
           hooks: [
             {
               type: "command",
-              command: `context-mode hook vscode-copilot ${hookType.toLowerCase()}`,
+              command: buildVSCodeHookCommand(hookType, pluginRoot),
             },
           ],
         },
