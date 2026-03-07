@@ -342,6 +342,8 @@ export class PolyglotExecutor {
       "NO_PROXY",
       "SSL_CERT_FILE",
       "CURL_CA_BUNDLE",
+      "NODE_EXTRA_CA_CERTS",
+      "REQUESTS_CA_BUNDLE",
       // XDG (config paths for gh, gcloud, etc.)
       "XDG_CONFIG_HOME",
       "XDG_DATA_HOME",
