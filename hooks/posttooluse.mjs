@@ -10,20 +10,21 @@ import "./suppress-stderr.mjs";
  */
 
 import { readStdin, getSessionId, getSessionDBPath } from "./session-helpers.mjs";
-import { join, dirname } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { createSessionLoaders } from "./session-loaders.mjs";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // Resolve absolute path for imports — relative dynamic imports can fail
 // when Claude Code invokes hooks from a different working directory.
 const HOOK_DIR = dirname(fileURLToPath(import.meta.url));
-const PKG_SESSION = join(HOOK_DIR, "..", "build", "session");
+const { loadSessionDB, loadExtract } = createSessionLoaders(HOOK_DIR);
 
 try {
   const raw = await readStdin();
   const input = JSON.parse(raw);
 
-  const { extractEvents } = await import(pathToFileURL(join(PKG_SESSION, "extract.js")).href);
-  const { SessionDB } = await import(pathToFileURL(join(PKG_SESSION, "db.js")).href);
+  const { extractEvents } = await loadExtract();
+  const { SessionDB } = await loadSessionDB();
 
   const dbPath = getSessionDBPath();
   const db = new SessionDB({ dbPath });

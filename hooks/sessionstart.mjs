@@ -17,14 +17,15 @@ import "./suppress-stderr.mjs";
 import { ROUTING_BLOCK } from "./routing-block.mjs";
 import { readStdin, getSessionId, getSessionDBPath, getSessionEventsPath, getCleanupFlagPath } from "./session-helpers.mjs";
 import { writeSessionEventsFile, buildSessionDirective, getSessionEvents, getLatestSessionEvents } from "./session-directive.mjs";
+import { createSessionLoaders } from "./session-loaders.mjs";
 import { join, dirname } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 
 // Resolve absolute path for imports (fileURLToPath for Windows compat)
 const HOOK_DIR = dirname(fileURLToPath(import.meta.url));
-const PKG_SESSION = join(HOOK_DIR, "..", "build", "session");
+const { loadSessionDB } = createSessionLoaders(HOOK_DIR);
 
 let additionalContext = ROUTING_BLOCK;
 
@@ -35,7 +36,7 @@ try {
 
   if (source === "compact") {
     // Session was compacted — write events to file for auto-indexing, inject directive only
-    const { SessionDB } = await import(pathToFileURL(join(PKG_SESSION, "db.js")).href);
+    const { SessionDB } = await loadSessionDB();
     const dbPath = getSessionDBPath();
     const db = new SessionDB({ dbPath });
     const sessionId = getSessionId(input);
@@ -56,7 +57,7 @@ try {
     // User used --continue — clear cleanup flag so startup doesn't wipe data
     try { unlinkSync(getCleanupFlagPath()); } catch { /* no flag */ }
 
-    const { SessionDB } = await import(pathToFileURL(join(PKG_SESSION, "db.js")).href);
+    const { SessionDB } = await loadSessionDB();
     const dbPath = getSessionDBPath();
     const db = new SessionDB({ dbPath });
 
@@ -69,7 +70,7 @@ try {
     db.close();
   } else if (source === "startup") {
     // Fresh session (no --continue) — clean slate, capture CLAUDE.md rules.
-    const { SessionDB } = await import(pathToFileURL(join(PKG_SESSION, "db.js")).href);
+    const { SessionDB } = await loadSessionDB();
     const dbPath = getSessionDBPath();
     const db = new SessionDB({ dbPath });
     try { unlinkSync(getSessionEventsPath()); } catch { /* no stale file */ }

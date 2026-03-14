@@ -9,14 +9,15 @@ import "../suppress-stderr.mjs";
  * Must be fast (<20ms). No network, no LLM, just SQLite writes.
  */
 
+import { createSessionLoaders } from "../session-loaders.mjs";
 import { readStdin, getSessionId, getSessionDBPath, getProjectDir, VSCODE_OPTS } from "../session-helpers.mjs";
 import { appendFileSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 
 const HOOK_DIR = dirname(fileURLToPath(import.meta.url));
-const PKG_SESSION = join(HOOK_DIR, "..", "..", "build", "session");
+const { loadSessionDB, loadExtract } = createSessionLoaders(HOOK_DIR);
 const OPTS = VSCODE_OPTS;
 const DEBUG_LOG = join(homedir(), ".vscode", "context-mode", "posttooluse-debug.log");
 
@@ -26,8 +27,8 @@ try {
 
   appendFileSync(DEBUG_LOG, `[${new Date().toISOString()}] CALL: ${input.tool_name}\n`);
 
-  const { extractEvents } = await import(pathToFileURL(join(PKG_SESSION, "extract.js")).href);
-  const { SessionDB } = await import(pathToFileURL(join(PKG_SESSION, "db.js")).href);
+  const { extractEvents } = await loadExtract();
+  const { SessionDB } = await loadSessionDB();
 
   const dbPath = getSessionDBPath(OPTS);
   const db = new SessionDB({ dbPath });
