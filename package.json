@@ -52,6 +52,7 @@
     ".claude-plugin",
     ".openclaw-plugin",
     ".mcp.json",
+    "openclaw.plugin.json",
     "start.mjs",
     "README.md",
     "LICENSE"
