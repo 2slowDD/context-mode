@@ -734,16 +734,17 @@ describe("Timeout Handling", () => {
 });
 
 describe("Output Truncation", () => {
-  test("smart truncation: keeps head + tail", async () => {
+  test("stdout is returned in full without truncation", async () => {
     const small = new PolyglotExecutor({ maxOutputBytes: 200, runtimes });
     const r = await small.execute({
       language: "javascript",
       code: 'for (let i = 0; i < 100; i++) console.log(`line ${i}: ${"x".repeat(20)}`);',
     });
-    assert.ok(r.stdout.includes("truncated"), "Should indicate truncation");
-    assert.ok(r.stdout.includes("line 0"), "Should preserve first lines (head)");
-    assert.ok(r.stdout.includes("line 99"), "Should preserve last lines (tail)");
-    assert.ok(r.stdout.includes("showing first"), "Should show head/tail counts");
+    assert.ok(!r.stdout.includes("truncated"), "stdout should NOT be truncated");
+    assert.ok(r.stdout.includes("line 0"), "Should contain first line");
+    assert.ok(r.stdout.includes("line 50"), "Should contain middle line (previously lost)");
+    assert.ok(r.stdout.includes("line 99"), "Should contain last line");
+    assert.ok(!r.stdout.includes("showing first"), "Should have no truncation marker");
   });
 
   test("does not truncate under limit", async () => {
@@ -754,7 +755,7 @@ describe("Output Truncation", () => {
     assert.ok(!r.stdout.includes("truncated"));
   });
 
-  test("smart truncation on stderr preserves error context", async () => {
+  test("stderr is also returned in full without truncation", async () => {
     const small = new PolyglotExecutor({ maxOutputBytes: 200, runtimes });
     const r = await small.execute({
       language: "javascript",
@@ -763,8 +764,10 @@ describe("Output Truncation", () => {
         console.error("FINAL ERROR: something broke");
       `,
     });
-    assert.ok(r.stderr.includes("FINAL ERROR"), "Should preserve last error line (tail)");
-    assert.ok(r.stderr.includes("warn 0"), "Should preserve first warning (head)");
+    assert.ok(r.stderr.includes("FINAL ERROR"), "Should contain last error line");
+    assert.ok(r.stderr.includes("warn 0"), "Should contain first warning");
+    assert.ok(r.stderr.includes("warn 25"), "Should contain middle warning (previously lost)");
+    assert.ok(!r.stderr.includes("truncated"), "stderr should NOT be truncated");
   });
 });
 

@@ -295,8 +295,8 @@ describe("Default Cap", () => {
   });
 });
 
-describe("Smart Truncation Interaction", () => {
-  test("truncation: hardCap and maxOutputBytes work together", async () => {
+describe("hardCap still limits output (smartTruncate removed from executor)", () => {
+  test("hardCap kills process but stdout is NOT truncated by smartTruncate", async () => {
     const executor = new PolyglotExecutor({ hardCapBytes: 50 * 1024, maxOutputBytes: 1024, runtimes });
     const r = await executor.execute({
       language: "javascript",
@@ -304,8 +304,49 @@ describe("Smart Truncation Interaction", () => {
       timeout: 10_000,
     });
     assert.ok(r.stderr.includes("output capped"), "Hard cap should trigger");
-    const stdoutBytes = Buffer.byteLength(r.stdout);
-    assert.ok(stdoutBytes < 50 * 1024, "Final stdout should be truncated by smartTruncate, got " + stdoutBytes + " bytes");
+    assert.ok(!r.stdout.includes("truncated"), "stdout should NOT have truncation marker");
+    assert.ok(!r.stdout.includes("showing first"), "stdout should NOT have head/tail marker");
+  });
+});
+
+describe("Large Output Auto-Indexing", () => {
+  test("large stdout is fully preserved by executor", async () => {
+    const executor = new PolyglotExecutor({ maxOutputBytes: 200, runtimes });
+    const r = await executor.execute({
+      language: "javascript",
+      code: 'for (let i = 0; i < 100; i++) console.log(`line ${i}: ${"x".repeat(20)}`);',
+    });
+    assert.ok(r.stdout.includes("line 0"), "Should contain first line");
+    assert.ok(r.stdout.includes("line 50"), "Should contain middle line");
+    assert.ok(r.stdout.includes("line 99"), "Should contain last line");
+    assert.ok(!r.stdout.includes("truncated"), "Should NOT be truncated");
+  });
+
+  test("large stdout is indexed into FTS5 and searchable", async () => {
+    const store = new ContentStore(":memory:");
+    const lines: string[] = [];
+    for (let i = 0; i < 5000; i++) lines.push(`line ${i}: data_value_${i}`);
+    const largeOutput = lines.join("\n");
+
+    const indexed = store.indexPlainText(largeOutput, "test:large-output");
+    assert.ok(indexed.totalChunks > 1, "Should be chunked into multiple sections");
+
+    const results = store.searchWithFallback("data_value_2500", 3, "test:large-output");
+    assert.ok(results.length > 0, "Middle content should be searchable");
+    assert.ok(results[0].content.includes("2500"), "Should find the middle line");
+
+    store.close();
+  });
+
+  test("small stdout is returned inline as-is", async () => {
+    const executor = new PolyglotExecutor({ runtimes });
+    const r = await executor.execute({
+      language: "javascript",
+      code: 'console.log("hello world");',
+    });
+    assert.equal(r.exitCode, 0);
+    assert.ok(r.stdout.includes("hello world"));
+    assert.ok(!r.stdout.includes("Indexed"), "Small output should NOT be indexed pointer");
   });
 });
 

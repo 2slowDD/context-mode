@@ -8,7 +8,6 @@ import {
   type RuntimeMap,
   type Language,
 } from "./runtime.js";
-import { smartTruncate } from "./truncate.js";
 export type { ExecResult } from "./types.js";
 import type { ExecResult } from "./types.js";
 
@@ -239,10 +238,9 @@ export class PolyglotExecutor {
           proc.stderr!.destroy();
           const rawStdout = Buffer.concat(stdoutChunks).toString("utf-8");
           const rawStderr = Buffer.concat(stderrChunks).toString("utf-8");
-          const max = this.#maxOutputBytes;
           res({
-            stdout: smartTruncate(rawStdout, max),
-            stderr: smartTruncate(rawStderr, max),
+            stdout: rawStdout,
+            stderr: rawStderr,
             exitCode: 0,
             timedOut: true,
             backgrounded: true,
@@ -291,9 +289,8 @@ export class PolyglotExecutor {
           rawStderr += `\n[output capped at ${(this.#hardCapBytes / 1024 / 1024).toFixed(0)}MB — process killed]`;
         }
 
-        const max = this.#maxOutputBytes;
-        const stdout = smartTruncate(rawStdout, max);
-        const stderr = smartTruncate(rawStderr, max);
+        const stdout = rawStdout;
+        const stderr = rawStderr;
 
         res({
           stdout,

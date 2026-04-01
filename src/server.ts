@@ -589,6 +589,16 @@ __cm_main().catch(e=>{console.error(e);process.exitCode=1});${background ? '\nse
             isError,
           });
         }
+        // Auto-index large error output into FTS5 — no data loss
+        if (Buffer.byteLength(output) > LARGE_OUTPUT_THRESHOLD) {
+          trackIndexed(Buffer.byteLength(output));
+          return trackResponse("ctx_execute", {
+            content: [
+              { type: "text" as const, text: intentSearch(output, "errors failures exceptions", isError ? `execute:${language}:error` : `execute:${language}`) },
+            ],
+            isError,
+          });
+        }
         return trackResponse("ctx_execute", {
           content: [
             { type: "text" as const, text: output },
@@ -607,6 +617,11 @@ __cm_main().catch(e=>{console.error(e);process.exitCode=1});${background ? '\nse
             { type: "text" as const, text: intentSearch(stdout, intent, `execute:${language}`) },
           ],
         });
+      }
+
+      // Auto-index large stdout into FTS5 — return pointer, not raw content
+      if (Buffer.byteLength(stdout) > LARGE_OUTPUT_THRESHOLD) {
+        return trackResponse("ctx_execute", indexStdout(stdout, `execute:${language}`));
       }
 
       return trackResponse("ctx_execute", {
@@ -652,6 +667,7 @@ function indexStdout(
 // ─────────────────────────────────────────────────────────
 
 const INTENT_SEARCH_THRESHOLD = 5_000; // bytes — ~80-100 lines
+const LARGE_OUTPUT_THRESHOLD = 102_400; // 100KB — auto-index into FTS5, return pointer
 
 function intentSearch(
   stdout: string,
@@ -804,6 +820,16 @@ server.registerTool(
             isError,
           });
         }
+        // Auto-index large error output into FTS5 — no data loss
+        if (Buffer.byteLength(output) > LARGE_OUTPUT_THRESHOLD) {
+          trackIndexed(Buffer.byteLength(output));
+          return trackResponse("ctx_execute_file", {
+            content: [
+              { type: "text" as const, text: intentSearch(output, "errors failures exceptions", isError ? `file:${path}:error` : `file:${path}`) },
+            ],
+            isError,
+          });
+        }
         return trackResponse("ctx_execute_file", {
           content: [
             { type: "text" as const, text: output },
@@ -821,6 +847,11 @@ server.registerTool(
             { type: "text" as const, text: intentSearch(stdout, intent, `file:${path}`) },
           ],
         });
+      }
+
+      // Auto-index large stdout into FTS5 — return pointer, not raw content
+      if (Buffer.byteLength(stdout) > LARGE_OUTPUT_THRESHOLD) {
+        return trackResponse("ctx_execute_file", indexStdout(stdout, `file:${path}`));
       }
 
       return trackResponse("ctx_execute_file", {
@@ -1419,9 +1450,8 @@ server.registerTool(
 
     try {
       // Execute each command individually so every command gets its own
-      // smartTruncate budget (~100KB). Previously, all commands were
-      // concatenated into a single script where smartTruncate (60% head +
-      // 40% tail) could silently drop middle commands. (Issue #61)
+      // output capture. Full stdout is preserved and indexed into FTS5.
+      // (Previously used smartTruncate which dropped middle content — Issue #61, #197)
       const perCommandOutputs: string[] = [];
       const startTime = Date.now();
       let timedOut = false;
