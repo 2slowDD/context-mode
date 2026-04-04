@@ -7,24 +7,6 @@
  */
 
 // ─────────────────────────────────────────────────────────
-// String truncation
-// ─────────────────────────────────────────────────────────
-
-/**
- * Truncate a string to at most `maxChars` characters, appending an ellipsis
- * when truncation occurs.
- *
- * @param str     - Input string.
- * @param maxChars - Maximum character count (inclusive). Must be >= 3.
- * @returns The original string if short enough, otherwise a truncated string
- *          ending with "...".
- */
-export function truncateString(str: string, maxChars: number): string {
-  if (str.length <= maxChars) return str;
-  return str.slice(0, Math.max(0, maxChars - 3)) + "...";
-}
-
-// ─────────────────────────────────────────────────────────
 // JSON truncation
 // ─────────────────────────────────────────────────────────
 

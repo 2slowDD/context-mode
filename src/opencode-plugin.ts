@@ -99,7 +99,7 @@ export const ContextModePlugin = async (ctx: PluginContext) => {
   db.ensureSession(sessionId, projectDir);
   
   // Clean up old sessions on startup (replaces SessionStart hook)
-  db.cleanupOldSessions(0);
+  db.cleanupOldSessions(7);
 
   return {
     // ── PreToolUse: Routing enforcement ─────────────────

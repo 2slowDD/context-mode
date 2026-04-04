@@ -14,7 +14,7 @@ export interface SessionEvent {
   /** e.g. "file", "cwd", "error", "git", "task", "decision",
    *  "rule", "env", "role", "skill", "subagent", "data", "intent" */
   category: string;
-  /** Extracted payload, truncated to 300 chars max */
+  /** Extracted payload — full data, no truncation */
   data: string;
   /** 1=critical (rules, files, tasks) … 5=low */
   priority: number;
@@ -41,18 +41,16 @@ export interface HookInput {
 
 // ── Internal helpers ───────────────────────────────────────────────────────
 
-/** Truncate a string to at most `max` characters. */
-function truncate(value: string | null | undefined, max = 300): string {
+/** Null-safe string coercion — no truncation, preserves full data. */
+function safeString(value: string | null | undefined): string {
   if (value == null) return "";
-  if (value.length <= max) return value;
-  return value.slice(0, max);
+  return String(value);
 }
 
-/** Serialise an unknown value to a string, then truncate. */
-function truncateAny(value: unknown, max = 300): string {
+/** Serialise an unknown value to a string — no truncation. */
+function safeStringAny(value: unknown): string {
   if (value == null) return "";
-  const str = typeof value === "string" ? value : JSON.stringify(value);
-  return truncate(str, max);
+  return typeof value === "string" ? value : JSON.stringify(value);
 }
 
 // ── Category extractors ────────────────────────────────────────────────────
@@ -79,7 +77,7 @@ function extractFileAndRule(input: HookInput): SessionEvent[] {
       events.push({
         type: "rule",
         category: "rule",
-        data: truncate(filePath),
+        data: safeString(filePath),
         priority: 1,
       });
 
@@ -88,7 +86,7 @@ function extractFileAndRule(input: HookInput): SessionEvent[] {
         events.push({
           type: "rule_content",
           category: "rule",
-          data: truncate(tool_response, 5000),
+          data: safeString(tool_response),
           priority: 1,
         });
       }
@@ -98,7 +96,7 @@ function extractFileAndRule(input: HookInput): SessionEvent[] {
     events.push({
       type: "file_read",
       category: "file",
-      data: truncate(filePath),
+      data: safeString(filePath),
       priority: 1,
     });
 
@@ -110,7 +108,7 @@ function extractFileAndRule(input: HookInput): SessionEvent[] {
     events.push({
       type: "file_edit",
       category: "file",
-      data: truncate(filePath),
+      data: safeString(filePath),
       priority: 1,
     });
     return events;
@@ -121,7 +119,7 @@ function extractFileAndRule(input: HookInput): SessionEvent[] {
     events.push({
       type: "file_edit",
       category: "file",
-      data: truncate(notebookPath),
+      data: safeString(notebookPath),
       priority: 1,
     });
     return events;
@@ -132,7 +130,7 @@ function extractFileAndRule(input: HookInput): SessionEvent[] {
     events.push({
       type: "file_write",
       category: "file",
-      data: truncate(filePath),
+      data: safeString(filePath),
       priority: 1,
     });
     return events;
@@ -144,7 +142,7 @@ function extractFileAndRule(input: HookInput): SessionEvent[] {
     events.push({
       type: "file_glob",
       category: "file",
-      data: truncate(pattern),
+      data: safeString(pattern),
       priority: 3,
     });
     return events;
@@ -157,7 +155,7 @@ function extractFileAndRule(input: HookInput): SessionEvent[] {
     events.push({
       type: "file_search",
       category: "file",
-      data: truncate(`${searchPattern} in ${searchPath}`),
+      data: safeString(`${searchPattern} in ${searchPath}`),
       priority: 3,
     });
     return events;
@@ -182,7 +180,7 @@ function extractCwd(input: HookInput): SessionEvent[] {
   return [{
     type: "cwd",
     category: "cwd",
-    data: truncate(dir),
+    data: safeString(dir),
     priority: 2,
   }];
 }
@@ -207,7 +205,7 @@ function extractError(input: HookInput): SessionEvent[] {
   return [{
     type: "error_tool",
     category: "error",
-    data: truncate(response, 300),
+    data: safeString(response),
     priority: 2,
   }];
 }
@@ -248,7 +246,7 @@ function extractGit(input: HookInput): SessionEvent[] {
   return [{
     type: "git",
     category: "git",
-    data: truncate(match.operation),
+    data: safeString(match.operation),
     priority: 2,
   }];
 }
@@ -269,7 +267,7 @@ function extractTask(input: HookInput): SessionEvent[] {
   return [{
     type,
     category: "task",
-    data: truncate(JSON.stringify(input.tool_input), 300),
+    data: safeString(JSON.stringify(input.tool_input)),
     priority: 1,
   }];
 }
@@ -301,15 +299,15 @@ function extractPlan(input: HookInput): SessionEvent[] {
     // Plan exit event with allowedPrompts detail
     const prompts = input.tool_input["allowedPrompts"];
     const detail = Array.isArray(prompts) && prompts.length > 0
-      ? `exited plan mode (allowed: ${truncateAny(prompts.map((p: unknown) => {
+      ? `exited plan mode (allowed: ${safeStringAny(prompts.map((p: unknown) => {
           if (typeof p === "object" && p !== null && "prompt" in p) return String((p as Record<string, unknown>).prompt);
           return String(p);
-        }).join(", "), 200)})`
+        }).join(", "))})`
       : "exited plan mode";
     events.push({
       type: "plan_exit",
       category: "plan",
-      data: truncate(detail),
+      data: safeString(detail),
       priority: 2,
     });
 
@@ -326,7 +324,7 @@ function extractPlan(input: HookInput): SessionEvent[] {
       events.push({
         type: "plan_rejected",
         category: "plan",
-        data: truncate(`plan rejected: ${input.tool_response ?? ""}`, 300),
+        data: safeString(`plan rejected: ${input.tool_response ?? ""}`),
         priority: 2,
       });
     }
@@ -341,7 +339,7 @@ function extractPlan(input: HookInput): SessionEvent[] {
       return [{
         type: "plan_file_write",
         category: "plan",
-        data: truncate(`plan file: ${filePath.split(/[/\\]/).pop() ?? filePath}`),
+        data: safeString(`plan file: ${filePath.split(/[/\\]/).pop() ?? filePath}`),
         priority: 2,
       }];
     }
@@ -389,7 +387,7 @@ function extractEnv(input: HookInput): SessionEvent[] {
   return [{
     type: "env",
     category: "env",
-    data: truncate(sanitized),
+    data: safeString(sanitized),
     priority: 2,
   }];
 }
@@ -405,7 +403,7 @@ function extractSkill(input: HookInput): SessionEvent[] {
   return [{
     type: "skill",
     category: "skill",
-    data: truncate(skillName),
+    data: safeString(skillName),
     priority: 3,
   }];
 }
@@ -419,16 +417,16 @@ function extractSkill(input: HookInput): SessionEvent[] {
 function extractSubagent(input: HookInput): SessionEvent[] {
   if (input.tool_name !== "Agent") return [];
 
-  const prompt = truncate(String(input.tool_input["prompt"] ?? input.tool_input["description"] ?? ""), 200);
-  const response = input.tool_response ? truncate(String(input.tool_response), 300) : "";
+  const prompt = safeString(String(input.tool_input["prompt"] ?? input.tool_input["description"] ?? ""));
+  const response = input.tool_response ? safeString(String(input.tool_response)) : "";
   const isCompleted = response.length > 0;
 
   return [{
     type: isCompleted ? "subagent_completed" : "subagent_launched",
     category: "subagent",
     data: isCompleted
-      ? truncate(`[completed] ${prompt} → ${response}`, 300)
-      : truncate(`[launched] ${prompt}`, 300),
+      ? safeString(`[completed] ${prompt} → ${response}`)
+      : safeString(`[launched] ${prompt}`),
     priority: isCompleted ? 2 : 3,
   }];
 }
@@ -447,12 +445,12 @@ function extractMcp(input: HookInput): SessionEvent[] {
 
   // Extract first string argument for context
   const firstArg = Object.values(tool_input).find((v): v is string => typeof v === "string");
-  const argStr = firstArg ? `: ${truncate(String(firstArg), 100)}` : "";
+  const argStr = firstArg ? `: ${safeString(String(firstArg))}` : "";
 
   return [{
     type: "mcp",
     category: "mcp",
-    data: truncate(`${toolShort}${argStr}`),
+    data: safeString(`${toolShort}${argStr}`),
     priority: 3,
   }];
 }
@@ -469,15 +467,15 @@ function extractDecision(input: HookInput): SessionEvent[] {
     ? String((questions[0] as Record<string, unknown>)["question"] ?? "")
     : "";
 
-  const answer = truncate(String(input.tool_response ?? ""), 150);
+  const answer = safeString(String(input.tool_response ?? ""));
   const summary = questionText
-    ? `Q: ${truncate(questionText, 120)} → A: ${answer}`
+    ? `Q: ${safeString(questionText)} → A: ${answer}`
     : `answer: ${answer}`;
 
   return [{
     type: "decision_question",
     category: "decision",
-    data: truncate(summary),
+    data: safeString(summary),
     priority: 2,
   }];
 }
@@ -493,7 +491,7 @@ function extractWorktree(input: HookInput): SessionEvent[] {
   return [{
     type: "worktree",
     category: "env",
-    data: truncate(`entered worktree: ${name}`),
+    data: safeString(`entered worktree: ${name}`),
     priority: 2,
   }];
 }
@@ -520,7 +518,7 @@ function extractUserDecision(message: string): SessionEvent[] {
   return [{
     type: "decision",
     category: "decision",
-    data: truncate(message, 300),
+    data: safeString(message),
     priority: 2,
   }];
 }
@@ -544,7 +542,7 @@ function extractRole(message: string): SessionEvent[] {
   return [{
     type: "role",
     category: "role",
-    data: truncate(message, 300),
+    data: safeString(message),
     priority: 3,
   }];
 }
@@ -568,7 +566,7 @@ function extractIntent(message: string): SessionEvent[] {
   return [{
     type: "intent",
     category: "intent",
-    data: truncate(match.mode),
+    data: safeString(match.mode),
     priority: 4,
   }];
 }
@@ -583,7 +581,7 @@ function extractData(message: string): SessionEvent[] {
   return [{
     type: "data",
     category: "data",
-    data: truncate(message, 200),
+    data: safeString(message),
     priority: 4,
   }];
 }

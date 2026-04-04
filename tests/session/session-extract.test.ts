@@ -1,4 +1,6 @@
 import { strict as assert } from "node:assert";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, test } from "vitest";
 import { extractEvents, extractUserEvents } from "../../src/session/extract.js";
 
@@ -712,8 +714,8 @@ describe("Data Events", () => {
     const dataEvents = events.filter(e => e.type === "data");
     assert.equal(dataEvents.length, 1);
     assert.equal(dataEvents[0].priority, 4);
-    // data field is the preview, truncated to 300 chars
-    assert.ok(dataEvents[0].data.length <= 300);
+    // data field preserves full message (no truncation)
+    assert.equal(dataEvents[0].data, largeMessage);
   });
 
   test("does not extract data event from short message", () => {
@@ -1147,28 +1149,30 @@ describe("Multi-Event & Edge Cases", () => {
 });
 
 // ════════════════════════════════════════════
-// TRUNCATION & SAFETY
+// SAFETY — safeString preserves full data
 // ════════════════════════════════════════════
 
-describe("Truncation & Safety", () => {
-  test("truncates long tool responses in error events", () => {
+describe("Safety — safeString preserves full data", () => {
+  test("preserves full tool response in error events (no truncation)", () => {
+    const longError = "Error: " + "x".repeat(10000);
     const input = {
       tool_name: "Bash",
       tool_input: { command: "npm test" },
-      tool_response: "Error: " + "x".repeat(10000),
+      tool_response: longError,
     };
 
     const events = extractEvents(input);
     const errorEvents = events.filter(e => e.type === "error_tool");
     assert.equal(errorEvents.length, 1);
-    assert.ok(errorEvents[0].data.length <= 300, `data.length = ${errorEvents[0].data.length}`);
+    assert.equal(errorEvents[0].data, longError, "Full error string must be preserved");
   });
 
-  test("data field is always a string of max 300 chars", () => {
+  test("data field is always a string and preserves full content", () => {
+    const longPath = "/project/src/" + "a".repeat(500) + ".ts";
     const input = {
       tool_name: "Edit",
       tool_input: {
-        file_path: "/project/src/" + "a".repeat(500) + ".ts",
+        file_path: longPath,
         old_string: "x",
         new_string: "y",
       },
@@ -1178,8 +1182,8 @@ describe("Truncation & Safety", () => {
     const events = extractEvents(input);
     for (const event of events) {
       assert.equal(typeof event.data, "string", `event.type=${event.type} data should be string`);
-      assert.ok(event.data.length <= 300, `event.type=${event.type} data.length=${event.data.length} exceeds 300`);
     }
+    assert.equal(events[0].data, longPath, "Full path must be preserved without truncation");
   });
 });
 
@@ -1358,5 +1362,67 @@ describe("Dependency Install Events", () => {
     const events = extractEvents(input);
     const envEvents = events.filter(e => e.type === "env");
     assert.equal(envEvents.length, 1);
+  });
+});
+
+// ════════════════════════════════════════════
+// ZERO-TRUNCATION: safeString replaces truncate
+// ════════════════════════════════════════════
+
+describe("Zero-truncation architecture", () => {
+  const extractSource = readFileSync(
+    resolve(__dirname, "../../src/session/extract.ts"),
+    "utf-8",
+  );
+
+  test("extract.ts contains zero truncate() calls", () => {
+    const truncateMatches = extractSource.match(/\btruncate\(/g) ?? [];
+    assert.equal(
+      truncateMatches.length,
+      0,
+      `Expected 0 truncate() calls but found ${truncateMatches.length}`,
+    );
+  });
+
+  test("extract.ts contains zero truncateAny() calls", () => {
+    const truncateAnyMatches = extractSource.match(/\btruncateAny\(/g) ?? [];
+    assert.equal(
+      truncateAnyMatches.length,
+      0,
+      `Expected 0 truncateAny() calls but found ${truncateAnyMatches.length}`,
+    );
+  });
+
+  test("extract.ts uses safeString() for null-safe string conversion", () => {
+    const safeStringMatches = extractSource.match(/\bsafeString\(/g) ?? [];
+    assert.ok(
+      safeStringMatches.length > 0,
+      "Expected at least one safeString() call in extract.ts",
+    );
+  });
+
+  test("safeString preserves full data without truncation", () => {
+    const longPath = "/very/long/path/" + "a".repeat(500) + "/file.ts";
+    const input = {
+      tool_name: "Edit",
+      tool_input: { file_path: longPath, old_string: "x", new_string: "y" },
+      tool_response: "ok",
+    };
+
+    const events = extractEvents(input);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].data, longPath, "safeString must preserve full string without truncation");
+  });
+
+  test("safeString handles null/undefined gracefully", () => {
+    const input = {
+      tool_name: "Edit",
+      tool_input: { file_path: undefined as unknown as string },
+      tool_response: "ok",
+    };
+
+    const events = extractEvents(input);
+    // Should not throw and should produce an event (with empty string data from undefined)
+    assert.ok(events.length >= 1);
   });
 });

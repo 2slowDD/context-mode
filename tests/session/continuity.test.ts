@@ -125,7 +125,7 @@ describe("renderTaskState — task completion filtering", () => {
     const result = renderTaskState(events);
     expect(result).toContain("Fix auth bug");
     expect(result).toContain("Add tests");
-    expect(result).toContain("<task_state>");
+    expect(result).toContain("[pending]");
   });
 
   it("filters out completed tasks", () => {

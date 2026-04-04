@@ -1,17 +1,19 @@
 /**
- * Snapshot builder — converts stored SessionEvents into an XML resume snapshot.
+ * Snapshot builder — converts stored SessionEvents into a reference-based
+ * XML resume snapshot.
  *
  * Pure functions only. No database access, no file system, no side effects.
- * The output XML is injected into Claude's context after a compact event to
- * restore session awareness.
  *
- * Budget: default 2048 bytes, allocated by priority tier:
- *   P1 (file, task, rule):                          50% = ~1024 bytes
- *   P2 (cwd, error, decision, env, git):            35% = ~716 bytes
- *   P3-P4 (subagent, skill, role, data, intent):    15% = ~308 bytes
+ * The output XML is injected into the LLM's context after a compact event to
+ * restore session awareness. Instead of truncated inline data, each section
+ * contains a natural summary plus a runnable search tool call that retrieves
+ * full details from the indexed knowledge base on demand.
+ *
+ * Zero truncation. Zero information loss. Full data lives in SessionDB;
+ * the snapshot is a table of contents.
  */
 
-import { escapeXML, truncateString } from "../truncate.js";
+import { escapeXML } from "../truncate.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -25,41 +27,54 @@ export interface StoredEvent {
 }
 
 export interface BuildSnapshotOpts {
-  maxBytes?: number;
+  maxBytes?: number;      // KEPT for backward compat but IGNORED
   compactCount?: number;
+  searchTool?: string;    // platform-specific tool name, default "ctx_search"
 }
 
-// ── Constants ────────────────────────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
-const DEFAULT_MAX_BYTES = 2048;
 const MAX_ACTIVE_FILES = 10;
 
-// Priority tier category groupings
-const P1_CATEGORIES = new Set(["file", "task", "rule"]);
-const P2_CATEGORIES = new Set(["cwd", "error", "decision", "env", "git"]);
-// P3-P4: everything else (subagent, skill, role, data, intent, mcp)
-
-// ── Section renderers ────────────────────────────────────────────────────────
+/**
+ * Extract 2-4 keyword phrases from a list of strings for BM25 search queries.
+ * Takes actual data values and picks representative terms.
+ */
+function buildQueries(items: string[], maxQueries = 4): string[] {
+  const unique = [...new Set(items.filter(s => s.length > 0))];
+  const selected = unique.slice(0, maxQueries);
+  return selected.map(s => {
+    // Take the first ~80 chars as a query — enough for BM25 matching
+    const trimmed = s.length > 80 ? s.slice(0, 80) : s;
+    return trimmed;
+  });
+}
 
 /**
- * Render <active_files> from file events.
- * Deduplicates by path, counts operations, keeps the last 10 files.
+ * Format a runnable tool call block for a section.
  */
-export function renderActiveFiles(fileEvents: StoredEvent[]): string {
+function toolCall(toolName: string, queries: string[]): string {
+  if (queries.length === 0) return "";
+  const escaped = queries.map(q => `"${escapeXML(q)}"`).join(", ");
+  return `\n    For full details:\n    ${escapeXML(toolName)}(\n      queries: [${escaped}],\n      source: "session-events"\n    )`;
+}
+
+// ── Section builders ─────────────────────────────────────────────────────────
+
+function buildFilesSection(fileEvents: StoredEvent[], searchTool: string): string {
   if (fileEvents.length === 0) return "";
 
-  // Build per-file operation counts and track last operation
-  const fileMap = new Map<string, { ops: Map<string, number>; last: string }>();
+  // Build per-file operation counts
+  const fileMap = new Map<string, { ops: Map<string, number> }>();
 
   for (const ev of fileEvents) {
     const path = ev.data;
     let entry = fileMap.get(path);
     if (!entry) {
-      entry = { ops: new Map(), last: "" };
+      entry = { ops: new Map() };
       fileMap.set(path, entry);
     }
 
-    // Derive operation from event type
     let op: string;
     if (ev.type === "file_write") op = "write";
     else if (ev.type === "file_read") op = "read";
@@ -67,21 +82,131 @@ export function renderActiveFiles(fileEvents: StoredEvent[]): string {
     else op = ev.type;
 
     entry.ops.set(op, (entry.ops.get(op) ?? 0) + 1);
-    entry.last = op;
   }
 
   // Limit to last MAX_ACTIVE_FILES files (by insertion order = chronological)
   const entries = Array.from(fileMap.entries());
   const limited = entries.slice(-MAX_ACTIVE_FILES);
 
-  const lines: string[] = ["  <active_files>"];
-  for (const [path, { ops, last }] of limited) {
+  const summaryLines: string[] = [];
+  const queryTerms: string[] = [];
+
+  for (const [path, { ops }] of limited) {
     const opsStr = Array.from(ops.entries())
-      .map(([k, v]) => `${k}:${v}`)
-      .join(",");
-    lines.push(`    <file path="${escapeXML(path)}" ops="${escapeXML(opsStr)}" last="${escapeXML(last)}" />`);
+      .map(([k, v]) => `${k}×${v}`)
+      .join(", ");
+    // Use just the filename for concise display
+    const fileName = path.split("/").pop() ?? path;
+    summaryLines.push(`    ${escapeXML(fileName)} (${escapeXML(opsStr)})`);
+    queryTerms.push(`${fileName} ${Array.from(ops.keys()).join(" ")}`);
   }
-  lines.push("  </active_files>");
+
+  const queries = buildQueries(queryTerms);
+  const lines = [
+    `  <files count="${fileMap.size}">`,
+    ...summaryLines,
+    toolCall(searchTool, queries),
+    `  </files>`,
+  ];
+  return lines.join("\n");
+}
+
+function buildErrorsSection(errorEvents: StoredEvent[], searchTool: string): string {
+  if (errorEvents.length === 0) return "";
+
+  const summaryLines: string[] = [];
+  const queryTerms: string[] = [];
+
+  for (const ev of errorEvents) {
+    summaryLines.push(`    ${escapeXML(ev.data)}`);
+    queryTerms.push(ev.data);
+  }
+
+  const queries = buildQueries(queryTerms);
+  const lines = [
+    `  <errors count="${errorEvents.length}">`,
+    ...summaryLines,
+    toolCall(searchTool, queries),
+    `  </errors>`,
+  ];
+  return lines.join("\n");
+}
+
+function buildDecisionsSection(decisionEvents: StoredEvent[], searchTool: string): string {
+  if (decisionEvents.length === 0) return "";
+
+  const seen = new Set<string>();
+  const summaryLines: string[] = [];
+  const queryTerms: string[] = [];
+
+  for (const ev of decisionEvents) {
+    if (seen.has(ev.data)) continue;
+    seen.add(ev.data);
+    summaryLines.push(`    ${escapeXML(ev.data)}`);
+    queryTerms.push(ev.data);
+  }
+
+  if (summaryLines.length === 0) return "";
+
+  const queries = buildQueries(queryTerms);
+  const lines = [
+    `  <decisions count="${summaryLines.length}">`,
+    ...summaryLines,
+    toolCall(searchTool, queries),
+    `  </decisions>`,
+  ];
+  return lines.join("\n");
+}
+
+function buildRulesSection(ruleEvents: StoredEvent[], searchTool: string): string {
+  if (ruleEvents.length === 0) return "";
+
+  const seen = new Set<string>();
+  const summaryLines: string[] = [];
+  const queryTerms: string[] = [];
+
+  for (const ev of ruleEvents) {
+    if (seen.has(ev.data)) continue;
+    seen.add(ev.data);
+
+    if (ev.type === "rule_content") {
+      summaryLines.push(`    ${escapeXML(ev.data)}`);
+    } else {
+      summaryLines.push(`    ${escapeXML(ev.data)}`);
+    }
+    queryTerms.push(ev.data);
+  }
+
+  if (summaryLines.length === 0) return "";
+
+  const queries = buildQueries(queryTerms);
+  const lines = [
+    `  <rules count="${summaryLines.length}">`,
+    ...summaryLines,
+    toolCall(searchTool, queries),
+    `  </rules>`,
+  ];
+  return lines.join("\n");
+}
+
+function buildGitSection(gitEvents: StoredEvent[], searchTool: string): string {
+  if (gitEvents.length === 0) return "";
+
+  const summaryLines: string[] = [];
+  const queryTerms: string[] = [];
+
+  for (const ev of gitEvents) {
+    summaryLines.push(`    ${escapeXML(ev.data)}`);
+    queryTerms.push(ev.data);
+  }
+
+  const queries = buildQueries(queryTerms);
+  const lines = [
+    `  <git count="${gitEvents.length}">`,
+    ...summaryLines,
+    toolCall(searchTool, queries),
+    `  </git>`,
+  ];
   return lines.join("\n");
 }
 
@@ -91,7 +216,7 @@ export function renderActiveFiles(fileEvents: StoredEvent[]): string {
  * filters out completed tasks, and renders only pending/in-progress work.
  *
  * TaskCreate events have `{ subject }`, TaskUpdate events have `{ taskId, status }`.
- * Match by chronological order: creates[0] → lowest taskId from updates.
+ * Match by chronological order: creates[0] -> lowest taskId from updates.
  */
 export function renderTaskState(taskEvents: StoredEvent[]): string {
   if (taskEvents.length === 0) return "";
@@ -114,7 +239,7 @@ export function renderTaskState(taskEvents: StoredEvent[]): string {
 
   const DONE = new Set(["completed", "deleted", "failed"]);
 
-  // Match creates to updates positionally (creates[0] → lowest taskId)
+  // Match creates to updates positionally (creates[0] -> lowest taskId)
   const sortedIds = Object.keys(updates).sort((a, b) => Number(a) - Number(b));
 
   const pending: string[] = [];
@@ -129,173 +254,145 @@ export function renderTaskState(taskEvents: StoredEvent[]): string {
   // All tasks completed — nothing to render
   if (pending.length === 0) return "";
 
-  const lines: string[] = ["  <task_state>"];
+  const lines: string[] = [];
   for (const task of pending) {
-    lines.push(`    - ${escapeXML(truncateString(task, 100))}`);
+    lines.push(`    [pending] ${escapeXML(task)}`);
   }
-  lines.push("  </task_state>");
   return lines.join("\n");
 }
 
-/**
- * Render <rules> from rule events.
- * Lists each unique rule source path + content summaries.
- */
-export function renderRules(ruleEvents: StoredEvent[]): string {
-  if (ruleEvents.length === 0) return "";
+function buildTaskSection(taskEvents: StoredEvent[], searchTool: string): string {
+  const taskContent = renderTaskState(taskEvents);
+  if (!taskContent) return "";
 
-  const seen = new Set<string>();
-  const lines: string[] = ["  <rules>"];
-
-  for (const ev of ruleEvents) {
-    const key = ev.data;
-    if (seen.has(key)) continue;
-    seen.add(key);
-
-    if (ev.type === "rule_content") {
-      // Rule content: render as content block (survives compact)
-      lines.push(`    <rule_content>${escapeXML(truncateString(ev.data, 400))}</rule_content>`);
-    } else {
-      // Rule path
-      lines.push(`    - ${escapeXML(truncateString(ev.data, 200))}`);
-    }
+  const queryTerms: string[] = [];
+  for (const ev of taskEvents) {
+    try {
+      const parsed = JSON.parse(ev.data) as Record<string, unknown>;
+      if (typeof parsed.subject === "string") {
+        queryTerms.push(parsed.subject);
+      }
+    } catch { /* not JSON */ }
   }
 
-  lines.push("  </rules>");
+  const queries = buildQueries(queryTerms);
+  const pendingCount = taskContent.split("\n").length;
+
+  const lines = [
+    `  <task_state count="${pendingCount}">`,
+    taskContent,
+    toolCall(searchTool, queries),
+    `  </task_state>`,
+  ];
   return lines.join("\n");
 }
 
-/**
- * Render <decisions> from decision events.
- */
-export function renderDecisions(decisionEvents: StoredEvent[]): string {
-  if (decisionEvents.length === 0) return "";
-
-  const seen = new Set<string>();
-  const lines: string[] = ["  <decisions>"];
-
-  for (const ev of decisionEvents) {
-    const key = ev.data;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    lines.push(`    - ${escapeXML(truncateString(ev.data, 200))}`);
-  }
-
-  lines.push("  </decisions>");
-  return lines.join("\n");
-}
-
-/**
- * Render <environment> from cwd, env, and git events.
- */
-export function renderEnvironment(
-  cwdEvent: StoredEvent | undefined,
+function buildEnvironmentSection(
+  cwdEvents: StoredEvent[],
   envEvents: StoredEvent[],
-  gitEvent: StoredEvent | undefined,
+  searchTool: string,
 ): string {
-  const parts: string[] = [];
+  if (cwdEvents.length === 0 && envEvents.length === 0) return "";
 
-  if (!cwdEvent && envEvents.length === 0 && !gitEvent) return "";
+  const summaryLines: string[] = [];
+  const queryTerms: string[] = [];
 
-  parts.push("  <environment>");
-
-  if (cwdEvent) {
-    parts.push(`    <cwd>${escapeXML(cwdEvent.data)}</cwd>`);
-  }
-
-  if (gitEvent) {
-    // git event data is the operation type (branch, commit, push, etc.)
-    parts.push(`    <git op="${escapeXML(gitEvent.data)}" />`);
+  if (cwdEvents.length > 0) {
+    const lastCwd = cwdEvents[cwdEvents.length - 1];
+    summaryLines.push(`    cwd: ${escapeXML(lastCwd.data)}`);
+    queryTerms.push("working directory");
   }
 
   for (const env of envEvents) {
-    parts.push(`    <env>${escapeXML(truncateString(env.data, 150))}</env>`);
+    summaryLines.push(`    ${escapeXML(env.data)}`);
+    queryTerms.push(env.data);
   }
 
-  parts.push("  </environment>");
-  return parts.join("\n");
-}
-
-/**
- * Render <errors_encountered> from error events.
- */
-export function renderErrors(errorEvents: StoredEvent[]): string {
-  if (errorEvents.length === 0) return "";
-
-  const lines: string[] = ["  <errors_encountered>"];
-
-  for (const ev of errorEvents) {
-    lines.push(`    - ${escapeXML(truncateString(ev.data, 150))}`);
-  }
-
-  lines.push("  </errors_encountered>");
+  const queries = buildQueries(queryTerms);
+  const lines = [
+    `  <environment>`,
+    ...summaryLines,
+    toolCall(searchTool, queries),
+    `  </environment>`,
+  ];
   return lines.join("\n");
 }
 
-/**
- * Render <intent> from the most recent intent event.
- */
-export function renderIntent(intentEvent: StoredEvent): string {
-  return `  <intent mode="${escapeXML(intentEvent.data)}">${escapeXML(truncateString(intentEvent.data, 100))}</intent>`;
-}
-
-/**
- * Render <subagents> from subagent events.
- * Shows agent dispatch status (launched/completed) and result summaries.
- */
-export function renderSubagents(subagentEvents: StoredEvent[]): string {
+function buildSubagentsSection(subagentEvents: StoredEvent[], searchTool: string): string {
   if (subagentEvents.length === 0) return "";
 
-  const lines: string[] = ["  <subagents>"];
+  const summaryLines: string[] = [];
+  const queryTerms: string[] = [];
+
   for (const ev of subagentEvents) {
     const status = ev.type === "subagent_completed" ? "completed"
       : ev.type === "subagent_launched" ? "launched"
       : "unknown";
-    lines.push(`    <agent status="${status}">${escapeXML(truncateString(ev.data, 200))}</agent>`);
+    summaryLines.push(`    [${status}] ${escapeXML(ev.data)}`);
+    queryTerms.push(`subagent ${ev.data}`);
   }
-  lines.push("  </subagents>");
+
+  const queries = buildQueries(queryTerms);
+  const lines = [
+    `  <subagents count="${subagentEvents.length}">`,
+    ...summaryLines,
+    toolCall(searchTool, queries),
+    `  </subagents>`,
+  ];
   return lines.join("\n");
 }
 
-/**
- * Render <mcp_tools> from MCP tool call events.
- * Deduplicates by tool name, shows usage count.
- */
-export function renderMcpTools(mcpEvents: StoredEvent[]): string {
-  if (mcpEvents.length === 0) return "";
+function buildSkillsSection(skillEvents: StoredEvent[], searchTool: string): string {
+  if (skillEvents.length === 0) return "";
 
-  // Count usage per tool
-  const toolCounts = new Map<string, number>();
-  for (const ev of mcpEvents) {
-    const tool = ev.data.split(":")[0].trim();
-    toolCounts.set(tool, (toolCounts.get(tool) ?? 0) + 1);
+  // Count invocations per skill name
+  const skillCounts = new Map<string, number>();
+  for (const ev of skillEvents) {
+    const name = ev.data.split(":")[0].trim();
+    skillCounts.set(name, (skillCounts.get(name) ?? 0) + 1);
   }
 
-  const lines: string[] = ["  <mcp_tools>"];
-  for (const [tool, count] of toolCounts) {
-    lines.push(`    <tool name="${escapeXML(tool)}" calls="${count}" />`);
+  const summaryLines: string[] = [];
+  const queryTerms: string[] = [];
+
+  for (const [name, count] of skillCounts) {
+    summaryLines.push(`    ${escapeXML(name)} (${count}×)`);
+    queryTerms.push(`skill ${name} invocation`);
   }
-  lines.push("  </mcp_tools>");
+
+  const queries = buildQueries(queryTerms);
+  const lines = [
+    `  <skills count="${skillEvents.length}">`,
+    ...summaryLines,
+    toolCall(searchTool, queries),
+    `  </skills>`,
+  ];
   return lines.join("\n");
+}
+
+function buildIntentSection(intentEvents: StoredEvent[]): string {
+  if (intentEvents.length === 0) return "";
+  const lastIntent = intentEvents[intentEvents.length - 1];
+  return `  <intent mode="${escapeXML(lastIntent.data)}"/>`;
 }
 
 // ── Main builder ─────────────────────────────────────────────────────────────
 
 /**
- * Build a resume snapshot XML string from stored session events.
+ * Build a reference-based resume snapshot XML string from stored session events.
  *
  * Algorithm:
  * 1. Group events by category
- * 2. Render each section
- * 3. Assemble by priority tier with budget trimming
- * 4. If over maxBytes, drop lowest priority sections first
+ * 2. For each non-empty category, build a summary section with a runnable
+ *    search tool call containing exact queries for full details
+ * 3. Assemble ALL non-empty sections — no priority dropping, no byte budget
  */
 export function buildResumeSnapshot(
   events: StoredEvent[],
   opts?: BuildSnapshotOpts,
 ): string {
-  const maxBytes = opts?.maxBytes ?? DEFAULT_MAX_BYTES;
   const compactCount = opts?.compactCount ?? 1;
+  const searchTool = opts?.searchTool ?? "ctx_search";
   const now = new Date().toISOString();
 
   // ── Group events by category ──
@@ -309,8 +406,7 @@ export function buildResumeSnapshot(
   const gitEvents: StoredEvent[] = [];
   const subagentEvents: StoredEvent[] = [];
   const intentEvents: StoredEvent[] = [];
-  const mcpEvents: StoredEvent[] = [];
-  const planEvents: StoredEvent[] = [];
+  const skillEvents: StoredEvent[] = [];
 
   for (const ev of events) {
     switch (ev.category) {
@@ -324,80 +420,58 @@ export function buildResumeSnapshot(
       case "git": gitEvents.push(ev); break;
       case "subagent": subagentEvents.push(ev); break;
       case "intent": intentEvents.push(ev); break;
-      case "mcp": mcpEvents.push(ev); break;
-      case "plan": planEvents.push(ev); break;
+      case "skill": skillEvents.push(ev); break;
     }
   }
 
-  // ── Render sections by priority tier ──
+  // ── Build all sections ──
+  const sections: string[] = [];
 
-  // P1 sections (50% budget): active_files, task_state, rules
-  const p1Sections: string[] = [];
-  const activeFiles = renderActiveFiles(fileEvents);
-  if (activeFiles) p1Sections.push(activeFiles);
-  const taskState = renderTaskState(taskEvents);
-  if (taskState) p1Sections.push(taskState);
-  const rules = renderRules(ruleEvents);
-  if (rules) p1Sections.push(rules);
+  // How-to-search instruction block (always present)
+  sections.push(`  <how_to_search>
+  Each section below contains a summary of prior work.
+  For FULL DETAILS, run the exact tool call shown under each section.
+  Do NOT ask the user to re-explain prior work. Search first.
+  Do NOT invent your own queries — use the ones provided.
+  </how_to_search>`);
 
-  // P2 sections (35% budget): decisions, environment, errors_encountered, completed subagents
-  const p2Sections: string[] = [];
-  const decisions = renderDecisions(decisionEvents);
-  if (decisions) p2Sections.push(decisions);
-  const lastCwd = cwdEvents.length > 0 ? cwdEvents[cwdEvents.length - 1] : undefined;
-  const lastGit = gitEvents.length > 0 ? gitEvents[gitEvents.length - 1] : undefined;
-  const environment = renderEnvironment(lastCwd, envEvents, lastGit);
-  if (environment) p2Sections.push(environment);
-  const errors = renderErrors(errorEvents);
-  if (errors) p2Sections.push(errors);
-  // Completed subagents are P2 — their results must survive budget trimming
-  const completedSubagents = subagentEvents.filter(e => e.type === "subagent_completed");
-  const subagentsP2 = renderSubagents(completedSubagents);
-  if (subagentsP2) p2Sections.push(subagentsP2);
-  // Plan mode state — show if plan is active (last event is plan_enter)
-  if (planEvents.length > 0) {
-    const lastPlan = planEvents[planEvents.length - 1];
-    if (lastPlan.type === "plan_enter") {
-      p2Sections.push(`  <plan_mode status="active" />`);
-    }
-  }
+  const files = buildFilesSection(fileEvents, searchTool);
+  if (files) sections.push(files);
 
-  // P3-P4 sections (15% budget): intent, mcp_tools, launched subagents
-  const p3Sections: string[] = [];
-  if (intentEvents.length > 0) {
-    const lastIntent = intentEvents[intentEvents.length - 1];
-    p3Sections.push(renderIntent(lastIntent));
-  }
-  const mcpTools = renderMcpTools(mcpEvents);
-  if (mcpTools) p3Sections.push(mcpTools);
-  const launchedSubagents = subagentEvents.filter(e => e.type === "subagent_launched");
-  const subagentsP3 = renderSubagents(launchedSubagents);
-  if (subagentsP3) p3Sections.push(subagentsP3);
+  const errors = buildErrorsSection(errorEvents, searchTool);
+  if (errors) sections.push(errors);
 
-  // ── Assemble with budget trimming ──
-  const header = `<session_resume compact_count="${compactCount}" events_captured="${events.length}" generated_at="${now}">`;
+  const decisions = buildDecisionsSection(decisionEvents, searchTool);
+  if (decisions) sections.push(decisions);
+
+  const rules = buildRulesSection(ruleEvents, searchTool);
+  if (rules) sections.push(rules);
+
+  const git = buildGitSection(gitEvents, searchTool);
+  if (git) sections.push(git);
+
+  const tasks = buildTaskSection(taskEvents, searchTool);
+  if (tasks) sections.push(tasks);
+
+  const environment = buildEnvironmentSection(cwdEvents, envEvents, searchTool);
+  if (environment) sections.push(environment);
+
+  const subagents = buildSubagentsSection(subagentEvents, searchTool);
+  if (subagents) sections.push(subagents);
+
+  const skills = buildSkillsSection(skillEvents, searchTool);
+  if (skills) sections.push(skills);
+
+  const intent = buildIntentSection(intentEvents);
+  if (intent) sections.push(intent);
+
+  // ── Assemble ──
+  const header = `<session_resume events="${events.length}" compact_count="${compactCount}" generated_at="${now}">`;
   const footer = `</session_resume>`;
 
-  // Try assembling all tiers, drop lowest priority first if over budget
-  const tiers = [p1Sections, p2Sections, p3Sections];
-
-  // Start with all tiers and progressively drop from the back
-  for (let dropFrom = tiers.length; dropFrom >= 0; dropFrom--) {
-    const activeTiers = tiers.slice(0, dropFrom);
-    const body = activeTiers.flat().join("\n");
-
-    let xml: string;
-    if (body) {
-      xml = `${header}\n${body}\n${footer}`;
-    } else {
-      xml = `${header}\n${footer}`;
-    }
-
-    if (Buffer.byteLength(xml) <= maxBytes) {
-      return xml;
-    }
+  const body = sections.join("\n\n");
+  if (body) {
+    return `${header}\n\n${body}\n\n${footer}`;
   }
-
-  // If even header+footer is over budget, return the minimal XML
   return `${header}\n${footer}`;
 }

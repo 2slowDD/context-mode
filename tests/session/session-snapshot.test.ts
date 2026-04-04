@@ -2,14 +2,7 @@ import { strict as assert } from "node:assert";
 import { describe, test } from "vitest";
 import {
   buildResumeSnapshot,
-  renderActiveFiles,
   renderTaskState,
-  renderRules,
-  renderDecisions,
-  renderEnvironment,
-  renderErrors,
-  renderIntent,
-  renderSubagents,
   type StoredEvent,
 } from "../../src/session/snapshot.js";
 
@@ -29,36 +22,36 @@ function makeEvent(overrides: Partial<StoredEvent> & Pick<StoredEvent, "type" | 
 // ════════════════════════════════════════════
 
 describe("Slice 1: Empty Events", () => {
-  test("buildResumeSnapshot with empty events returns valid XML with events_captured=0", () => {
+  test("buildResumeSnapshot with empty events returns valid XML with events=0", () => {
     const xml = buildResumeSnapshot([]);
-    assert.ok(xml.includes('events_captured="0"'), `expected events_captured="0", got: ${xml}`);
+    assert.ok(xml.includes('events="0"'), `expected events="0", got: ${xml}`);
     assert.ok(xml.startsWith("<session_resume"), "should start with <session_resume");
     assert.ok(xml.endsWith("</session_resume>"), "should end with </session_resume>");
   });
 });
 
 // ════════════════════════════════════════════
-// SLICE 2: Single file event -> <active_files>
+// SLICE 2: Single file event -> <files>
 // ════════════════════════════════════════════
 
 describe("Slice 2: Single File Event", () => {
-  test("buildResumeSnapshot with single file event includes active_files", () => {
+  test("buildResumeSnapshot with single file event includes files section", () => {
     const events: StoredEvent[] = [
       makeEvent({ type: "file_edit", category: "file", data: "src/server.ts", priority: 1 }),
     ];
     const xml = buildResumeSnapshot(events);
-    assert.ok(xml.includes("<active_files>"), "should include <active_files>");
-    assert.ok(xml.includes("src/server.ts"), "should include file path");
-    assert.ok(xml.includes("</active_files>"), "should close active_files");
+    assert.ok(xml.includes("<files"), "should include <files");
+    assert.ok(xml.includes("server.ts"), "should include file name");
+    assert.ok(xml.includes("</files>"), "should close files");
   });
 });
 
 // ════════════════════════════════════════════
-// SLICE 3: renderActiveFiles deduplicates
+// SLICE 3: File deduplication and op counting
 // ════════════════════════════════════════════
 
 describe("Slice 3: File Deduplication", () => {
-  test("renderActiveFiles deduplicates files by path and counts ops", () => {
+  test("buildResumeSnapshot deduplicates files and counts ops", () => {
     const events: StoredEvent[] = [
       makeEvent({ type: "file_edit", category: "file", data: "src/server.ts", priority: 1 }),
       makeEvent({ type: "file_edit", category: "file", data: "src/server.ts", priority: 1 }),
@@ -66,45 +59,35 @@ describe("Slice 3: File Deduplication", () => {
       makeEvent({ type: "file_read", category: "file", data: "src/server.ts", priority: 1 }),
       makeEvent({ type: "file_read", category: "file", data: "src/server.ts", priority: 1 }),
     ];
-    const xml = renderActiveFiles(events);
+    const xml = buildResumeSnapshot(events);
 
-    // Should have only ONE <file> element for src/server.ts
-    const fileTagCount = (xml.match(/<file /g) || []).length;
-    assert.equal(fileTagCount, 1, `expected 1 file tag, got ${fileTagCount}`);
-
-    // Should show edit:3,read:2
-    assert.ok(xml.includes("edit:3"), `expected edit:3, got: ${xml}`);
-    assert.ok(xml.includes("read:2"), `expected read:2, got: ${xml}`);
-  });
-
-  test("renderActiveFiles tracks last operation correctly", () => {
-    const events: StoredEvent[] = [
-      makeEvent({ type: "file_edit", category: "file", data: "src/store.ts", priority: 1 }),
-      makeEvent({ type: "file_read", category: "file", data: "src/store.ts", priority: 1 }),
-    ];
-    const xml = renderActiveFiles(events);
-    assert.ok(xml.includes('last="read"'), `expected last="read", got: ${xml}`);
+    // Should show edit×3 and read×2 for server.ts
+    assert.ok(xml.includes("edit×3"), `expected edit×3, got: ${xml}`);
+    assert.ok(xml.includes("read×2"), `expected read×2, got: ${xml}`);
+    // count should reflect 1 unique file
+    assert.ok(xml.includes('count="1"'), `expected count="1" for files, got: ${xml}`);
   });
 });
 
 // ════════════════════════════════════════════
-// SLICE 4: renderActiveFiles limits to 10 files
+// SLICE 4: File limit to 10
 // ════════════════════════════════════════════
 
 describe("Slice 4: File Limit", () => {
-  test("renderActiveFiles limits to last 10 files", () => {
+  test("buildResumeSnapshot limits displayed files to last 10", () => {
     const events: StoredEvent[] = [];
     for (let i = 0; i < 15; i++) {
       events.push(makeEvent({
-        type: "file",
+        type: "file_edit",
         category: "file",
         data: `src/file-${i}.ts`,
         priority: 1,
       }));
     }
-    const xml = renderActiveFiles(events);
-    const fileTagCount = (xml.match(/<file /g) || []).length;
-    assert.equal(fileTagCount, 10, `expected 10 file tags, got ${fileTagCount}`);
+    const xml = buildResumeSnapshot(events);
+
+    // count attribute reflects total unique files
+    assert.ok(xml.includes('count="15"'), `expected count="15", got: ${xml}`);
 
     // Should keep the LAST 10 files (file-5 through file-14)
     assert.ok(!xml.includes("file-0.ts"), "should NOT include file-0 (dropped)");
@@ -125,7 +108,7 @@ describe("Slice 5: Task State", () => {
       makeEvent({ type: "task", category: "task", data: JSON.stringify({ taskId: "1", status: "in_progress" }), priority: 1 }),
     ];
     const xml = buildResumeSnapshot(events);
-    assert.ok(xml.includes("<task_state>"), "should include <task_state>");
+    assert.ok(xml.includes("<task_state"), "should include <task_state");
     assert.ok(xml.includes("Write tests"), "should include task content");
     assert.ok(xml.includes("</task_state>"), "should close task_state");
   });
@@ -156,41 +139,30 @@ describe("Slice 5: Task State", () => {
 // ════════════════════════════════════════════
 
 describe("Slice 6: Rules", () => {
-  test("buildResumeSnapshot with rule events includes rules", () => {
+  test("buildResumeSnapshot with rule events includes rules section", () => {
     const events: StoredEvent[] = [
       makeEvent({ type: "rule", category: "rule", data: "/project/CLAUDE.md", priority: 1 }),
     ];
     const xml = buildResumeSnapshot(events);
-    assert.ok(xml.includes("<rules>"), "should include <rules>");
+    assert.ok(xml.includes("<rules"), "should include <rules");
     assert.ok(xml.includes("CLAUDE.md"), "should include rule source");
     assert.ok(xml.includes("</rules>"), "should close rules");
   });
 });
 
 // ════════════════════════════════════════════
-// SLICE 7: Rules includes both CLAUDE.md and user decisions
+// SLICE 7: Rules deduplication
 // ════════════════════════════════════════════
 
-describe("Slice 7: Rules + Decisions", () => {
-  test("renderRules includes both CLAUDE.md rules and user decisions", () => {
-    const events: StoredEvent[] = [
-      makeEvent({ type: "rule", category: "rule", data: "CLAUDE.md: Never set Claude as git author", priority: 1 }),
-      makeEvent({ type: "rule", category: "rule", data: 'User correction: "use ctx- prefix, not cm-"', priority: 1 }),
-    ];
-    const xml = renderRules(events);
-    assert.ok(xml.includes("CLAUDE.md"), "should include CLAUDE.md rule");
-    assert.ok(xml.includes("ctx-"), "should include user correction");
-  });
-
-  test("renderRules deduplicates identical rules", () => {
+describe("Slice 7: Rules Deduplication", () => {
+  test("buildResumeSnapshot deduplicates identical rules", () => {
     const events: StoredEvent[] = [
       makeEvent({ type: "rule", category: "rule", data: "/project/CLAUDE.md", priority: 1 }),
       makeEvent({ type: "rule", category: "rule", data: "/project/CLAUDE.md", priority: 1 }),
     ];
-    const xml = renderRules(events);
-    // Count the number of "- " list items
-    const itemCount = (xml.match(/    - /g) || []).length;
-    assert.equal(itemCount, 1, `expected 1 unique rule, got ${itemCount}`);
+    const xml = buildResumeSnapshot(events);
+    // Count should reflect 1 unique rule
+    assert.ok(xml.includes('count="1"'), `expected count="1" for rules`);
   });
 });
 
@@ -199,66 +171,61 @@ describe("Slice 7: Rules + Decisions", () => {
 // ════════════════════════════════════════════
 
 describe("Slice 8: Environment", () => {
-  test("buildResumeSnapshot with environment events includes environment with cwd and git", () => {
+  test("buildResumeSnapshot with cwd event includes environment", () => {
     const events: StoredEvent[] = [
       makeEvent({ type: "cwd", category: "cwd", data: "/Users/mksglu/project", priority: 2 }),
-      makeEvent({ type: "git", category: "git", data: "branch", priority: 2 }),
     ];
     const xml = buildResumeSnapshot(events);
     assert.ok(xml.includes("<environment>"), "should include <environment>");
-    assert.ok(xml.includes("<cwd>"), "should include <cwd>");
+    assert.ok(xml.includes("cwd:"), "should include cwd label");
     assert.ok(xml.includes("/Users/mksglu/project"), "should include cwd path");
-    assert.ok(xml.includes("<git "), "should include <git>");
     assert.ok(xml.includes("</environment>"), "should close environment");
   });
 
-  test("renderEnvironment with only cwd", () => {
-    const cwd = makeEvent({ type: "cwd", category: "cwd", data: "/project", priority: 2 });
-    const xml = renderEnvironment(cwd, [], undefined);
-    assert.ok(xml.includes("<cwd>/project</cwd>"), "should include cwd");
-    assert.ok(!xml.includes("<git"), "should not include git when absent");
-  });
-
-  test("renderEnvironment with env events", () => {
-    const envEv = makeEvent({ type: "env", category: "env", data: "source .venv/bin/activate", priority: 2 });
-    const xml = renderEnvironment(undefined, [envEv], undefined);
-    assert.ok(xml.includes("<env>"), "should include <env>");
+  test("buildResumeSnapshot with env events includes environment", () => {
+    const events: StoredEvent[] = [
+      makeEvent({ type: "env", category: "env", data: "source .venv/bin/activate", priority: 2 }),
+    ];
+    const xml = buildResumeSnapshot(events);
+    assert.ok(xml.includes("<environment>"), "should include <environment>");
     assert.ok(xml.includes("activate"), "should include env data");
+    assert.ok(xml.includes("</environment>"), "should close environment");
   });
 
-  test("renderEnvironment returns empty string when all inputs are empty", () => {
-    const xml = renderEnvironment(undefined, [], undefined);
-    assert.equal(xml, "", "should return empty string with no inputs");
+  test("buildResumeSnapshot with no cwd/env events omits environment", () => {
+    const xml = buildResumeSnapshot([]);
+    assert.ok(!xml.includes("<environment>"), "should not include <environment> with no events");
   });
 });
 
 // ════════════════════════════════════════════
-// SLICE 9: Error events -> <errors_encountered>
+// SLICE 9: Error events -> <errors>
 // ════════════════════════════════════════════
 
 describe("Slice 9: Errors", () => {
-  test("buildResumeSnapshot with error events includes errors_encountered", () => {
+  test("buildResumeSnapshot with error events includes errors section", () => {
     const events: StoredEvent[] = [
       makeEvent({ type: "error_tool", category: "error", data: "Push rejected: non-fast-forward", priority: 2 }),
     ];
     const xml = buildResumeSnapshot(events);
-    assert.ok(xml.includes("<errors_encountered>"), "should include <errors_encountered>");
+    assert.ok(xml.includes("<errors"), "should include <errors");
     assert.ok(xml.includes("Push rejected"), "should include error data");
-    assert.ok(xml.includes("</errors_encountered>"), "should close errors_encountered");
+    assert.ok(xml.includes("</errors>"), "should close errors");
   });
 
-  test("renderErrors renders multiple errors", () => {
+  test("buildResumeSnapshot renders multiple errors", () => {
     const events: StoredEvent[] = [
       makeEvent({ type: "error_tool", category: "error", data: "Error 1", priority: 2 }),
       makeEvent({ type: "error_tool", category: "error", data: "Error 2", priority: 2 }),
     ];
-    const xml = renderErrors(events);
+    const xml = buildResumeSnapshot(events);
     assert.ok(xml.includes("Error 1"), "should include first error");
     assert.ok(xml.includes("Error 2"), "should include second error");
   });
 
-  test("renderErrors returns empty for no events", () => {
-    assert.equal(renderErrors([]), "", "should return empty string");
+  test("buildResumeSnapshot with no error events omits errors section", () => {
+    const xml = buildResumeSnapshot([]);
+    assert.ok(!xml.includes("<errors"), "should not include errors with no events");
   });
 });
 
@@ -275,13 +242,6 @@ describe("Slice 10: Intent", () => {
     assert.ok(xml.includes("<intent"), "should include <intent>");
     assert.ok(xml.includes('mode="implement"'), 'should include mode="implement"');
   });
-
-  test("renderIntent renders mode attribute and content", () => {
-    const ev = makeEvent({ type: "intent", category: "intent", data: "investigate", priority: 4 });
-    const xml = renderIntent(ev);
-    assert.ok(xml.includes('mode="investigate"'), 'should include mode attribute');
-    assert.ok(xml.includes("investigate"), "should include intent text");
-  });
 });
 
 // ════════════════════════════════════════════
@@ -289,24 +249,21 @@ describe("Slice 10: Intent", () => {
 // ════════════════════════════════════════════
 
 describe("Slice 11: XML Escaping", () => {
-  test("escapes XML special characters in data fields", () => {
+  test("escapes XML special characters in file data", () => {
     const events: StoredEvent[] = [
       makeEvent({ type: "file_edit", category: "file", data: 'src/<Main & "App">.tsx', priority: 1 }),
     ];
     const xml = buildResumeSnapshot(events);
-    // Should not contain raw < > & " in the data portion
     assert.ok(xml.includes("&lt;Main"), "should escape < to &lt;");
     assert.ok(xml.includes("&amp;"), "should escape & to &amp;");
     assert.ok(xml.includes("&quot;App&quot;"), "should escape quotes");
-    // Should NOT contain the raw unescaped version in attribute values
-    assert.ok(!xml.includes('path="src/<Main'), "should not have unescaped < in attribute");
   });
 
   test("escapes XML in rule data", () => {
     const events: StoredEvent[] = [
       makeEvent({ type: "rule", category: "rule", data: "Rule: x < y && z > 0", priority: 1 }),
     ];
-    const xml = renderRules(events);
+    const xml = buildResumeSnapshot(events);
     assert.ok(xml.includes("&lt;"), "should escape < in rules");
     assert.ok(xml.includes("&amp;"), "should escape & in rules");
     assert.ok(xml.includes("&gt;"), "should escape > in rules");
@@ -316,23 +273,22 @@ describe("Slice 11: XML Escaping", () => {
     const events: StoredEvent[] = [
       makeEvent({ type: "error_tool", category: "error", data: "Error: <tag> & 'quote'", priority: 2 }),
     ];
-    const xml = renderErrors(events);
+    const xml = buildResumeSnapshot(events);
     assert.ok(xml.includes("&lt;tag&gt;"), "should escape tags in errors");
     assert.ok(xml.includes("&apos;quote&apos;"), "should escape single quotes in errors");
   });
 });
 
 // ════════════════════════════════════════════
-// SLICE 12: Total output <= 2048 bytes
+// SLICE 12: No truncation — output contains no ellipsis
 // ════════════════════════════════════════════
 
-describe("Slice 12: Byte Budget", () => {
-  test("total output is always <= 2048 bytes (default maxBytes)", () => {
-    // Generate a lot of events to stress the budget
+describe("Slice 12: No Truncation", () => {
+  test("output contains no ellipsis — zero truncation artifacts", () => {
     const events: StoredEvent[] = [];
     for (let i = 0; i < 50; i++) {
       events.push(makeEvent({
-        type: "file",
+        type: "file_edit",
         category: "file",
         data: `src/very/long/path/to/some/deeply/nested/file-${i}.ts`,
         priority: 1,
@@ -342,7 +298,7 @@ describe("Slice 12: Byte Budget", () => {
       events.push(makeEvent({
         type: "task",
         category: "task",
-        data: `Task ${i}: ${"x".repeat(100)}`,
+        data: JSON.stringify({ subject: `Task ${i}: ${"x".repeat(100)}` }),
         priority: 1,
       }));
     }
@@ -365,98 +321,77 @@ describe("Slice 12: Byte Budget", () => {
     events.push(makeEvent({ type: "intent", category: "intent", data: "implement", priority: 4 }));
 
     const xml = buildResumeSnapshot(events);
-    const byteSize = Buffer.byteLength(xml);
-    assert.ok(byteSize <= 2048, `expected <= 2048 bytes, got ${byteSize}`);
-  });
-
-  test("respects custom maxBytes option", () => {
-    const events: StoredEvent[] = [];
-    for (let i = 0; i < 30; i++) {
-      events.push(makeEvent({
-        type: "file",
-        category: "file",
-        data: `src/file-${i}.ts`,
-        priority: 1,
-      }));
-    }
-
-    const xml = buildResumeSnapshot(events, { maxBytes: 512 });
-    const byteSize = Buffer.byteLength(xml);
-    assert.ok(byteSize <= 512, `expected <= 512 bytes, got ${byteSize}`);
+    // Must NOT contain truncation ellipsis
+    assert.ok(!xml.includes("..."), `output should contain no ellipsis, but found "..." in output`);
   });
 });
 
 // ════════════════════════════════════════════
-// SLICE 13: Budget trimming drops P3-P4 first
+// SLICE 13: how_to_search instruction block is present
 // ════════════════════════════════════════════
 
-describe("Slice 13: Budget Trimming", () => {
-  test("when over budget, drops P3-P4 sections first (intent)", () => {
-    // Create events that fill up the budget, forcing trimming
-    const events: StoredEvent[] = [];
-    // P1 content
-    for (let i = 0; i < 10; i++) {
-      events.push(makeEvent({
-        type: "file",
-        category: "file",
-        data: `src/component-${i}.tsx`,
-        priority: 1,
-      }));
-    }
-    // P2 content
-    for (let i = 0; i < 5; i++) {
-      events.push(makeEvent({
-        type: "error_tool",
-        category: "error",
-        data: `Error resolving module ${i}`,
-        priority: 2,
-      }));
-    }
-    // P3-P4 content (intent)
-    events.push(makeEvent({ type: "intent", category: "intent", data: "implement", priority: 4 }));
-
-    // Use a tight budget that can fit P1+P2 but not P3
-    const xmlFull = buildResumeSnapshot(events, { maxBytes: 4096 });
-    assert.ok(xmlFull.includes("<intent"), "with large budget, intent should be present");
-
-    // With a tight budget, intent should be dropped before P1/P2
-    const xmlTight = buildResumeSnapshot(events, { maxBytes: 900 });
-    if (xmlTight.includes("<active_files>") && !xmlTight.includes("<intent")) {
-      // P1 kept, P3-P4 dropped -- correct behavior
-      assert.ok(true, "P3-P4 (intent) dropped before P1 (active_files)");
-    } else if (!xmlTight.includes("<active_files>") && !xmlTight.includes("<intent")) {
-      // Both dropped due to very tight budget -- still correct (P3 dropped first)
-      assert.ok(true, "All sections dropped due to very tight budget");
-    } else if (xmlTight.includes("<intent") && !xmlTight.includes("<active_files>")) {
-      assert.fail("P1 was dropped but P3-P4 was kept -- wrong priority order");
-    }
+describe("Slice 13: how_to_search Instruction Block", () => {
+  test("how_to_search instruction block is present in output", () => {
+    const xml = buildResumeSnapshot([]);
+    assert.ok(xml.includes("<how_to_search>"), "should include <how_to_search> tag");
+    assert.ok(xml.includes("</how_to_search>"), "should include </how_to_search> tag");
+    assert.ok(xml.includes("For FULL DETAILS"), "should include instruction text");
+    assert.ok(xml.includes("Do NOT ask the user"), "should include user instruction");
   });
 
-  test("budget trimming preserves P1 sections over P2 when budget is very tight", () => {
+  test("how_to_search is present even with events", () => {
     const events: StoredEvent[] = [
-      makeEvent({ type: "file_edit", category: "file", data: "src/a.ts", priority: 1 }),
-      makeEvent({ type: "error_tool", category: "error", data: "Some error message that takes space", priority: 2 }),
-      makeEvent({ type: "intent", category: "intent", data: "implement", priority: 4 }),
+      makeEvent({ type: "file_edit", category: "file", data: "src/app.ts", priority: 1 }),
     ];
-
-    // Budget tight enough to force some dropping
-    const xml = buildResumeSnapshot(events, { maxBytes: 350 });
-
-    // P1 should be preserved longest
-    if (xml.includes("<active_files>")) {
-      // If P1 fits, P2/P3 may or may not fit
-      assert.ok(true, "P1 section preserved");
-    }
-    // If nothing fits, that's ok too -- the header/footer is valid XML
-    assert.ok(xml.startsWith("<session_resume"), "should always start with session_resume");
+    const xml = buildResumeSnapshot(events);
+    assert.ok(xml.includes("<how_to_search>"), "should include <how_to_search> with events");
   });
 });
 
 // ════════════════════════════════════════════
-// SLICE 14: XML structure
+// SLICE 14: Each non-empty section contains a search tool call
 // ════════════════════════════════════════════
 
-describe("Slice 14: XML Structure", () => {
+describe("Slice 14: Search Tool Calls in Sections", () => {
+  test("each non-empty section contains a search tool call with queries and source", () => {
+    const events: StoredEvent[] = [
+      makeEvent({ type: "file_edit", category: "file", data: "src/server.ts", priority: 1 }),
+      makeEvent({ type: "error_tool", category: "error", data: "Push rejected", priority: 2 }),
+      makeEvent({ type: "decision", category: "decision", data: "use ctx- prefix", priority: 2 }),
+      makeEvent({ type: "rule", category: "rule", data: "CLAUDE.md: git rules", priority: 1 }),
+      makeEvent({ type: "git", category: "git", data: "commit: feat: add feature", priority: 2 }),
+      makeEvent({ type: "task", category: "task", data: JSON.stringify({ subject: "Implement feature" }), priority: 1 }),
+      makeEvent({ type: "cwd", category: "cwd", data: "/project", priority: 2 }),
+      makeEvent({ type: "subagent_completed", category: "subagent", data: "Research complete", priority: 2 }),
+    ];
+    const xml = buildResumeSnapshot(events);
+
+    // Each data-bearing section should have queries: and source: "session-events"
+    assert.ok(xml.includes('queries:'), "should contain queries: in tool calls");
+    assert.ok(xml.includes('source: "session-events"'), 'should contain source: "session-events" in tool calls');
+
+    // Count occurrences of source: "session-events" — should match number of data sections
+    const sourceMatches = (xml.match(/source: "session-events"/g) || []).length;
+    // We have: files, errors, decisions, rules, git, task_state, environment, subagents = 8 sections
+    assert.ok(sourceMatches >= 7, `expected at least 7 source references, got ${sourceMatches}`);
+  });
+
+  test("searchTool option customizes tool name", () => {
+    const events: StoredEvent[] = [
+      makeEvent({ type: "file_edit", category: "file", data: "src/app.ts", priority: 1 }),
+      makeEvent({ type: "error_tool", category: "error", data: "Error found", priority: 2 }),
+    ];
+    const xml = buildResumeSnapshot(events, { searchTool: "custom_search" });
+    assert.ok(xml.includes("custom_search"), `should contain custom tool name, got: ${xml.slice(0, 500)}`);
+    assert.ok(!xml.includes("ctx_search"), "should NOT contain default tool name when custom is set");
+  });
+});
+
+// ════════════════════════════════════════════
+// SLICE 15: XML structure
+// ════════════════════════════════════════════
+
+describe("Slice 15: XML Structure", () => {
   test("buildResumeSnapshot starts with <session_resume and ends with </session_resume>", () => {
     const xml = buildResumeSnapshot([]);
     assert.ok(xml.startsWith("<session_resume"), `should start with <session_resume, got: ${xml.slice(0, 30)}`);
@@ -471,20 +406,19 @@ describe("Slice 14: XML Structure", () => {
   test("buildResumeSnapshot includes generated_at timestamp", () => {
     const xml = buildResumeSnapshot([]);
     assert.ok(xml.includes("generated_at="), "should include generated_at attribute");
-    // Verify it looks like an ISO timestamp
     const match = xml.match(/generated_at="([^"]+)"/);
     assert.ok(match, "should have a generated_at value");
     assert.ok(!isNaN(Date.parse(match![1])), "generated_at should be a valid ISO date");
   });
 
-  test("buildResumeSnapshot with events_captured matches input length", () => {
+  test("buildResumeSnapshot events attribute matches input length", () => {
     const events: StoredEvent[] = [
       makeEvent({ type: "file_edit", category: "file", data: "a.ts", priority: 1 }),
       makeEvent({ type: "file_edit", category: "file", data: "b.ts", priority: 1 }),
       makeEvent({ type: "cwd", category: "cwd", data: "/project", priority: 2 }),
     ];
     const xml = buildResumeSnapshot(events);
-    assert.ok(xml.includes('events_captured="3"'), `should have events_captured="3", got: ${xml.slice(0, 120)}`);
+    assert.ok(xml.includes('events="3"'), `should have events="3", got: ${xml.slice(0, 120)}`);
   });
 });
 
@@ -493,20 +427,8 @@ describe("Slice 14: XML Structure", () => {
 // ════════════════════════════════════════════
 
 describe("Edge Cases", () => {
-  test("renderActiveFiles returns empty string for no events", () => {
-    assert.equal(renderActiveFiles([]), "", "should return empty string");
-  });
-
   test("renderTaskState returns empty string for no events", () => {
     assert.equal(renderTaskState([]), "", "should return empty string");
-  });
-
-  test("renderRules returns empty string for no events", () => {
-    assert.equal(renderRules([]), "", "should return empty string");
-  });
-
-  test("renderDecisions returns empty string for no events", () => {
-    assert.equal(renderDecisions([]), "", "should return empty string");
   });
 
   test("full integration: all event types combined", () => {
@@ -523,53 +445,56 @@ describe("Edge Cases", () => {
       makeEvent({ type: "intent", category: "intent", data: "implement", priority: 4 }),
     ];
 
-    const xml = buildResumeSnapshot(events, { maxBytes: 4096 });
+    const xml = buildResumeSnapshot(events);
 
     // Verify structure
     assert.ok(xml.startsWith("<session_resume"), "starts with session_resume");
     assert.ok(xml.endsWith("</session_resume>"), "ends with session_resume");
-    assert.ok(xml.includes('events_captured="10"'), "captures all 10 events");
+    assert.ok(xml.includes('events="10"'), "captures all 10 events");
 
-    // Verify sections present (with generous budget)
-    assert.ok(xml.includes("<active_files>"), "has active_files");
-    assert.ok(xml.includes("<task_state>"), "has task_state");
-    assert.ok(xml.includes("<rules>"), "has rules");
-    assert.ok(xml.includes("<decisions>"), "has decisions");
+    // Verify sections present
+    assert.ok(xml.includes("<files"), "has files");
+    assert.ok(xml.includes("<task_state"), "has task_state");
+    assert.ok(xml.includes("<rules"), "has rules");
+    assert.ok(xml.includes("<decisions"), "has decisions");
     assert.ok(xml.includes("<environment>"), "has environment");
-    assert.ok(xml.includes("<errors_encountered>"), "has errors_encountered");
+    assert.ok(xml.includes("<errors"), "has errors");
     assert.ok(xml.includes("<intent"), "has intent");
 
-    // Verify byte budget
-    const byteSize = Buffer.byteLength(xml);
-    assert.ok(byteSize <= 4096, `expected <= 4096 bytes, got ${byteSize}`);
+    // Verify how_to_search is present
+    assert.ok(xml.includes("<how_to_search>"), "has how_to_search");
+
+    // Verify search references present
+    assert.ok(xml.includes('source: "session-events"'), 'has source: "session-events"');
+
+    // No truncation artifacts
+    assert.ok(!xml.includes("..."), "no ellipsis truncation artifacts");
   });
 
-  test("handles file_write type correctly in renderActiveFiles", () => {
+  test("handles file_write type correctly", () => {
     const events: StoredEvent[] = [
       makeEvent({ type: "file_write", category: "file", data: "src/new-file.ts", priority: 1 }),
     ];
-    const xml = renderActiveFiles(events);
-    assert.ok(xml.includes('ops="write:1"'), `expected write:1, got: ${xml}`);
-    assert.ok(xml.includes('last="write"'), `expected last="write", got: ${xml}`);
+    const xml = buildResumeSnapshot(events);
+    assert.ok(xml.includes("write×1"), `expected write×1, got: ${xml}`);
   });
 
-  test("renderDecisions deduplicates identical decisions", () => {
+  test("decisions are deduplicated", () => {
     const events: StoredEvent[] = [
       makeEvent({ type: "decision", category: "decision", data: "use ctx- prefix", priority: 2 }),
       makeEvent({ type: "decision", category: "decision", data: "use ctx- prefix", priority: 2 }),
     ];
-    const xml = renderDecisions(events);
-    const itemCount = (xml.match(/    - /g) || []).length;
-    assert.equal(itemCount, 1, `expected 1 unique decision, got ${itemCount}`);
+    const xml = buildResumeSnapshot(events);
+    assert.ok(xml.includes('count="1"'), `expected count="1" for deduplicated decisions`);
   });
 });
 
 // ════════════════════════════════════════════
-// SLICE 14: SUBAGENT EVENTS -> <subagents>
+// SUBAGENT EVENTS -> <subagents>
 // ════════════════════════════════════════════
 
-describe("Slice 14: Subagent Rendering", () => {
-  test("renderSubagents produces valid XML from subagent events", () => {
+describe("Subagent Rendering", () => {
+  test("buildResumeSnapshot with subagent events includes subagents section", () => {
     const events: StoredEvent[] = [
       makeEvent({
         type: "subagent_completed",
@@ -578,17 +503,18 @@ describe("Slice 14: Subagent Rendering", () => {
         priority: 2,
       }),
     ];
-    const xml = renderSubagents(events);
-    assert.ok(xml.includes("<subagents>"), "should open <subagents> tag");
-    assert.ok(xml.includes("</subagents>"), "should close </subagents> tag");
+    const xml = buildResumeSnapshot(events);
+    assert.ok(xml.includes("<subagents"), "should include <subagents");
+    assert.ok(xml.includes("</subagents>"), "should close </subagents>");
     assert.ok(xml.includes("CURSOR_TRACE_DIR"), "should include agent result data");
   });
 
-  test("renderSubagents returns empty string for no events", () => {
-    assert.equal(renderSubagents([]), "", "should return empty string with no subagent events");
+  test("buildResumeSnapshot with no subagent events omits subagents section", () => {
+    const xml = buildResumeSnapshot([]);
+    assert.ok(!xml.includes("<subagents"), "should not include subagents with no events");
   });
 
-  test("renderSubagents renders multiple agents", () => {
+  test("buildResumeSnapshot renders multiple subagents", () => {
     const events: StoredEvent[] = [
       makeEvent({
         type: "subagent_completed",
@@ -603,32 +529,9 @@ describe("Slice 14: Subagent Rendering", () => {
         priority: 2,
       }),
     ];
-    const xml = renderSubagents(events);
+    const xml = buildResumeSnapshot(events);
     assert.ok(xml.includes("Gemini CLI"), "should include first agent");
     assert.ok(xml.includes("Codex CLI"), "should include second agent");
-  });
-});
-
-// ════════════════════════════════════════════
-// SLICE 15: buildResumeSnapshot includes <subagents>
-// ════════════════════════════════════════════
-
-describe("Slice 15: Snapshot includes subagents", () => {
-  test("buildResumeSnapshot with subagent events includes <subagents> section", () => {
-    const events: StoredEvent[] = [
-      makeEvent({
-        type: "subagent_completed",
-        category: "subagent",
-        data: "[completed] Research env vars → Found VSCODE_PID",
-        priority: 2,
-      }),
-    ];
-    const xml = buildResumeSnapshot(events, { maxBytes: 4096 });
-    assert.ok(
-      xml.includes("<subagents>"),
-      `snapshot should include <subagents> section, got: ${xml}`,
-    );
-    assert.ok(xml.includes("VSCODE_PID"), "snapshot should include subagent data");
   });
 
   test("buildResumeSnapshot with 4 completed agents preserves all results", () => {
@@ -638,7 +541,7 @@ describe("Slice 15: Snapshot includes subagents", () => {
       makeEvent({ type: "subagent_completed", category: "subagent", data: "[completed] Codex → no detection", priority: 2 }),
       makeEvent({ type: "subagent_completed", category: "subagent", data: "[completed] VS Code → VSCODE_PID", priority: 2 }),
     ];
-    const xml = buildResumeSnapshot(events, { maxBytes: 4096 });
+    const xml = buildResumeSnapshot(events);
     assert.ok(xml.includes("Cursor"), "should include Cursor agent result");
     assert.ok(xml.includes("Gemini"), "should include Gemini agent result");
     assert.ok(xml.includes("Codex"), "should include Codex agent result");

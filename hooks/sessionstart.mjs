@@ -18,13 +18,14 @@ import "./ensure-deps.mjs";
 import { createRoutingBlock } from "./routing-block.mjs";
 import { createToolNamer } from "./core/tool-naming.mjs";
 
-const ROUTING_BLOCK = createRoutingBlock(createToolNamer("claude-code"));
+const toolNamer = createToolNamer("claude-code");
+const ROUTING_BLOCK = createRoutingBlock(toolNamer);
 import { readStdin, getSessionId, getSessionDBPath, getSessionEventsPath, getCleanupFlagPath } from "./session-helpers.mjs";
 import { writeSessionEventsFile, buildSessionDirective, getSessionEvents, getLatestSessionEvents } from "./session-directive.mjs";
 import { createSessionLoaders } from "./session-loaders.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { readFileSync, writeFileSync, unlinkSync, readdirSync, rmSync, statSync } from "node:fs";
+import { readFileSync, unlinkSync, readdirSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 
 // Resolve absolute path for imports (fileURLToPath for Windows compat)
@@ -53,7 +54,7 @@ try {
     const events = getSessionEvents(db, sessionId);
     if (events.length > 0) {
       const eventMeta = writeSessionEventsFile(events, getSessionEventsPath());
-      additionalContext += buildSessionDirective("compact", eventMeta);
+      additionalContext += buildSessionDirective("compact", eventMeta, toolNamer);
     }
 
     db.close();
@@ -68,7 +69,7 @@ try {
     const events = getLatestSessionEvents(db);
     if (events.length > 0) {
       const eventMeta = writeSessionEventsFile(events, getSessionEventsPath());
-      additionalContext += buildSessionDirective("resume", eventMeta);
+      additionalContext += buildSessionDirective("resume", eventMeta, toolNamer);
     }
 
     db.close();
@@ -82,21 +83,8 @@ try {
     // Detect true fresh start vs --continue (which fires startup→resume).
     // If cleanup flag exists from a PREVIOUS startup that was never followed by
     // resume, that was a true fresh start — aggressively wipe all data.
-    const cleanupFlag = getCleanupFlagPath();
-    let previousWasFresh = false;
-    try { readFileSync(cleanupFlag); previousWasFresh = true; } catch { /* no flag */ }
-
-    if (previousWasFresh) {
-      // Previous session was a true fresh start (no --continue) — clean slate
-      db.cleanupOldSessions(0);
-    } else {
-      // First startup or --continue will follow — only clean old sessions
-      db.cleanupOldSessions(7);
-    }
+    db.cleanupOldSessions(7);
     db.db.exec(`DELETE FROM session_events WHERE session_id NOT IN (SELECT session_id FROM session_meta)`);
-
-    // Write cleanup flag — resume will delete it if --continue follows
-    writeFileSync(cleanupFlag, new Date().toISOString(), "utf-8");
 
     // Proactively capture CLAUDE.md files — Claude Code loads them as system
     // context at startup, invisible to PostToolUse hooks. We read them from

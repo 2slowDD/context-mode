@@ -14,14 +14,15 @@ import "../ensure-deps.mjs";
 import { createRoutingBlock } from "../routing-block.mjs";
 import { createToolNamer } from "../core/tool-naming.mjs";
 
-const ROUTING_BLOCK = createRoutingBlock(createToolNamer("gemini-cli"));
+const toolNamer = createToolNamer("gemini-cli");
+const ROUTING_BLOCK = createRoutingBlock(toolNamer);
 import { writeSessionEventsFile, buildSessionDirective, getSessionEvents, getLatestSessionEvents } from "../session-directive.mjs";
 import {
   readStdin, getSessionId, getSessionDBPath, getSessionEventsPath, getCleanupFlagPath,
   getProjectDir, GEMINI_OPTS,
 } from "../session-helpers.mjs";
 import { join, dirname } from "node:path";
-import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { readFileSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -50,7 +51,7 @@ try {
     const events = getSessionEvents(db, sessionId);
     if (events.length > 0) {
       const eventMeta = writeSessionEventsFile(events, getSessionEventsPath(OPTS));
-      additionalContext += buildSessionDirective("compact", eventMeta);
+      additionalContext += buildSessionDirective("compact", eventMeta, toolNamer);
     }
 
     db.close();
@@ -64,7 +65,7 @@ try {
     const events = getLatestSessionEvents(db);
     if (events.length > 0) {
       const eventMeta = writeSessionEventsFile(events, getSessionEventsPath(OPTS));
-      additionalContext += buildSessionDirective("resume", eventMeta);
+      additionalContext += buildSessionDirective("resume", eventMeta, toolNamer);
     }
 
     db.close();
@@ -74,17 +75,8 @@ try {
     const db = new SessionDB({ dbPath });
     try { unlinkSync(getSessionEventsPath(OPTS)); } catch { /* no stale file */ }
 
-    const cleanupFlag = getCleanupFlagPath(OPTS);
-    let previousWasFresh = false;
-    try { readFileSync(cleanupFlag); previousWasFresh = true; } catch { /* no flag */ }
-
-    if (previousWasFresh) {
-      db.cleanupOldSessions(0);
-    } else {
-      db.cleanupOldSessions(7);
-    }
+    db.cleanupOldSessions(7);
     db.db.exec(`DELETE FROM session_events WHERE session_id NOT IN (SELECT session_id FROM session_meta)`);
-    writeFileSync(cleanupFlag, new Date().toISOString(), "utf-8");
 
     const sessionId = getSessionId(input, OPTS);
     const projectDir = getProjectDir(OPTS);

@@ -8,7 +8,8 @@ import "../ensure-deps.mjs";
 import { createRoutingBlock } from "../routing-block.mjs";
 import { createToolNamer } from "../core/tool-naming.mjs";
 
-const ROUTING_BLOCK = createRoutingBlock(createToolNamer("codex"));
+const toolNamer = createToolNamer("codex");
+const ROUTING_BLOCK = createRoutingBlock(toolNamer);
 import {
   writeSessionEventsFile,
   buildSessionDirective,
@@ -25,7 +26,7 @@ import {
   CODEX_OPTS,
 } from "../session-helpers.mjs";
 import { join } from "node:path";
-import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { unlinkSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HOOK_DIR = fileURLToPath(new URL(".", import.meta.url));
@@ -60,7 +61,7 @@ try {
       : getLatestSessionEvents(db);
     if (events.length > 0) {
       const eventMeta = writeSessionEventsFile(events, getSessionEventsPath(OPTS));
-      additionalContext += buildSessionDirective(source, eventMeta);
+      additionalContext += buildSessionDirective(source, eventMeta, toolNamer);
     }
 
     db.close();
@@ -70,17 +71,8 @@ try {
     const db = new SessionDB({ dbPath });
     try { unlinkSync(getSessionEventsPath(OPTS)); } catch { /* no stale file */ }
 
-    const cleanupFlag = getCleanupFlagPath(OPTS);
-    let previousWasFresh = false;
-    try { readFileSync(cleanupFlag); previousWasFresh = true; } catch { /* no flag */ }
-
-    if (previousWasFresh) {
-      db.cleanupOldSessions(0);
-    } else {
-      db.cleanupOldSessions(7);
-    }
+    db.cleanupOldSessions(7);
     db.db.exec(`DELETE FROM session_events WHERE session_id NOT IN (SELECT session_id FROM session_meta)`);
-    writeFileSync(cleanupFlag, new Date().toISOString(), "utf-8");
 
     const sessionId = getSessionId(input, OPTS);
     db.ensureSession(sessionId, projectDir);

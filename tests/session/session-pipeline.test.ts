@@ -78,15 +78,11 @@ describe("1. Full Pipeline: Edit + Git + CLAUDE.md", () => {
     db.upsertResume(sid, snapshot, storedEvents.length);
 
     // Step 5: Verify resume XML structure
-    assert.ok(snapshot.includes("<active_files>"), "resume should contain <active_files>");
-    assert.ok(snapshot.includes("<rules>"), "resume should contain <rules>");
-    assert.ok(snapshot.includes("<environment>"), "resume should contain <environment>");
+    assert.ok(snapshot.includes("<files"), "resume should contain <files section");
+    assert.ok(snapshot.includes("<rules"), "resume should contain <rules section");
+    assert.ok(snapshot.includes("<how_to_search>"), "resume should contain how_to_search block");
 
-    // Step 6: Verify budget constraint
-    const byteSize = Buffer.byteLength(snapshot);
-    assert.ok(byteSize <= 2048, `resume should be <= 2048 bytes, got ${byteSize}`);
-
-    // Step 7: Verify XML wrapper
+    // Step 6: Verify XML wrapper
     assert.ok(snapshot.startsWith("<session_resume"), "should start with <session_resume");
     assert.ok(snapshot.endsWith("</session_resume>"), "should end with </session_resume>");
 
@@ -123,10 +119,10 @@ describe("2. User Decisions Preserved in Resume", () => {
 
     // Build snapshot
     const storedEvents = db.getEvents(sid);
-    const snapshot = buildResumeSnapshot(storedEvents, { maxBytes: 4096 });
+    const snapshot = buildResumeSnapshot(storedEvents);
 
     // Verify the snapshot contains the decision text or rules/decisions section
-    const hasDecisions = snapshot.includes("<decisions>") || snapshot.includes("<rules>");
+    const hasDecisions = snapshot.includes("<decisions") || snapshot.includes("<rules");
     assert.ok(hasDecisions, "snapshot should contain <decisions> or <rules> section");
     assert.ok(
       snapshot.includes("never push to main") || snapshot.includes("push to main"),
@@ -170,8 +166,8 @@ describe("3. Deduplication End-to-End", () => {
     // Build snapshot -- file should appear only once
     const storedEvents = db.getEvents(sid);
     const snapshot = buildResumeSnapshot(storedEvents);
-    const fileTagCount = (snapshot.match(/<file /g) || []).length;
-    assert.equal(fileTagCount, 1, `expected 1 <file> tag, got ${fileTagCount}`);
+    // New format uses <files count="N"> — count should be 1 for one unique file
+    assert.ok(snapshot.includes('count="1"'), `expected count="1" for single file, got: ${snapshot}`);
   });
 });
 
@@ -272,91 +268,6 @@ describe("4. SessionStart Lifecycle", () => {
 });
 
 // ════════════════════════════════════════════
-// TEST 5: Budget constraint under stress
-// ════════════════════════════════════════════
-
-describe("5. Budget Constraint Under Stress", () => {
-  test("budget constraint: 100+ events still produce snapshot <= 2048 bytes", () => {
-    const db = createTestDB();
-    const sid = `stress-${randomUUID()}`;
-    db.ensureSession(sid, "/project");
-
-    // Insert 50 file events -- data_hash is first 16 hex chars (= first 8 bytes of data),
-    // so each data string must differ in its first 8 characters to avoid dedup.
-    for (let i = 0; i < 50; i++) {
-      db.insertEvent(sid, {
-        type: "file",
-        category: "file",
-        data: `${randomUUID()}/component.tsx`,
-        priority: 1,
-      }, "PostToolUse");
-    }
-
-    // Insert 20 task events -- UUID prefix ensures unique hash
-    for (let i = 0; i < 20; i++) {
-      db.insertEvent(sid, {
-        type: "task",
-        category: "task",
-        data: `${randomUUID()} implement feature`,
-        priority: 1,
-      }, "PostToolUse");
-    }
-
-    // Insert 15 rule events -- UUID prefix ensures unique hash
-    for (let i = 0; i < 15; i++) {
-      db.insertEvent(sid, {
-        type: "rule",
-        category: "rule",
-        data: `${randomUUID()} always follow convention`,
-        priority: 1,
-      }, "PostToolUse");
-    }
-
-    // Insert 10 error events -- UUID prefix ensures unique hash
-    for (let i = 0; i < 10; i++) {
-      db.insertEvent(sid, {
-        type: "error_tool",
-        category: "error",
-        data: `${randomUUID()} module not found`,
-        priority: 2,
-      }, "PostToolUse");
-    }
-
-    // Insert 5 decision events -- UUID prefix ensures unique hash
-    for (let i = 0; i < 5; i++) {
-      db.insertEvent(sid, {
-        type: "decision",
-        category: "decision",
-        data: `${randomUUID()} use approach`,
-        priority: 2,
-      }, "PostToolUse");
-    }
-
-    // Insert env, cwd, git events
-    db.insertEvent(sid, { type: "cwd", category: "cwd", data: "/project/src", priority: 2 }, "PostToolUse");
-    db.insertEvent(sid, { type: "git", category: "git", data: "branch", priority: 2 }, "PostToolUse");
-    db.insertEvent(sid, { type: "env", category: "env", data: "nvm use 20", priority: 2 }, "PostToolUse");
-    db.insertEvent(sid, { type: "intent", category: "intent", data: "implement", priority: 4 }, "PostToolUse");
-
-    // Total: 50 + 20 + 15 + 10 + 5 + 3 + 1 = 104 events
-    const totalEvents = db.getEventCount(sid);
-    assert.ok(totalEvents >= 100, `expected >= 100 events, got ${totalEvents}`);
-
-    // Build snapshot
-    const storedEvents = db.getEvents(sid);
-    const snapshot = buildResumeSnapshot(storedEvents);
-
-    // Verify budget
-    const byteSize = Buffer.byteLength(snapshot);
-    assert.ok(byteSize <= 2048, `expected <= 2048 bytes, got ${byteSize}`);
-
-    // Verify valid XML structure
-    assert.ok(snapshot.startsWith("<session_resume"), "should start with <session_resume");
-    assert.ok(snapshot.endsWith("</session_resume>"), "should end with </session_resume>");
-  });
-});
-
-// ════════════════════════════════════════════
 // TEST 6: Empty session produces valid but empty snapshot
 // ════════════════════════════════════════════
 
@@ -365,8 +276,8 @@ describe("6. Empty Session Snapshot", () => {
     // Build snapshot with empty events array (no DB needed)
     const snapshot = buildResumeSnapshot([]);
 
-    // Verify events_captured="0"
-    assert.ok(snapshot.includes('events_captured="0"'), `expected events_captured="0", got: ${snapshot}`);
+    // Verify events="0"
+    assert.ok(snapshot.includes('events="0"'), `expected events="0", got: ${snapshot}`);
 
     // Verify valid XML wrapper
     assert.ok(snapshot.startsWith("<session_resume"), "should start with <session_resume");
@@ -384,7 +295,7 @@ describe("6. Empty Session Snapshot", () => {
 
     const snapshot = buildResumeSnapshot(storedEvents);
 
-    assert.ok(snapshot.includes('events_captured="0"'), "should have events_captured=0");
+    assert.ok(snapshot.includes('events="0"'), "should have events_captured=0");
     assert.ok(snapshot.startsWith("<session_resume"), "should start with <session_resume");
     assert.ok(snapshot.endsWith("</session_resume>"), "should end with </session_resume>");
 
