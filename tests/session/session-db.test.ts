@@ -1,8 +1,9 @@
 import { strict as assert } from "node:assert";
 import { join } from "node:path";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
-import { afterAll, describe, test } from "vitest";
+import { afterAll, describe, expect, test } from "vitest";
 import { SessionDB } from "../../src/session/db.js";
 
 const cleanups: Array<() => void> = [];
@@ -529,5 +530,44 @@ describe("Limit", () => {
     // Should be the first 3 (ordered by id ASC)
     assert.equal(limited[0].data, "file-0.ts");
     assert.equal(limited[2].data, "file-2.ts");
+  });
+});
+
+// ════════════════════════════════════════════
+// Concurrent Insert Resilience (#243)
+// ════════════════════════════════════════════
+
+describe("Concurrent Insert Resilience (#243)", () => {
+  test("handles concurrent inserts from multiple DB instances", () => {
+    const dbPath = join(mkdtempSync(join(tmpdir(), "concurrent-")), "test.db");
+    const instances: SessionDB[] = [];
+
+    try {
+      // Open 5 instances against same file (simulates concurrent PostToolUse hooks)
+      for (let i = 0; i < 5; i++) {
+        instances.push(new SessionDB({ dbPath }));
+      }
+
+      const sessionId = "concurrent-test";
+      instances[0].ensureSession(sessionId, "/test/project");
+
+      // Insert from each instance
+      for (let i = 0; i < instances.length; i++) {
+        instances[i].insertEvent(sessionId, {
+          type: "tool",
+          category: "test",
+          data: JSON.stringify({ index: i }),
+          priority: 2,
+        }, "PostToolUse");
+      }
+
+      // Verify all events stored
+      const events = instances[0].getEvents(sessionId);
+      expect(events.length).toBe(5);
+    } finally {
+      for (const inst of instances) {
+        try { inst.close(); } catch {}
+      }
+    }
   });
 });

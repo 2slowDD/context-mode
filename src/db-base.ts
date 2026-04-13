@@ -201,7 +201,13 @@ export function loadDatabase(): typeof DatabaseConstructor {
           readonly: opts?.readonly,
           create: true,
         });
-        return new BunSQLiteAdapter(raw);
+        const adapter = new BunSQLiteAdapter(raw);
+        // Propagate busy_timeout — better-sqlite3 does this via constructor
+        // option but bun:sqlite does not, so we set it via pragma (#243)
+        if (opts?.timeout) {
+          adapter.pragma(`busy_timeout = ${opts.timeout}`);
+        }
+        return adapter;
       } as any;
     } else if (process.platform === "linux") {
       // Linux — try node:sqlite to avoid native addon SIGSEGV (nodejs/node#62515).
