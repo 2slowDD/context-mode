@@ -1833,35 +1833,43 @@ server.registerTool(
       lines.push("- [-] Performance: NORMAL — install Bun for 3-5x speed boost");
     }
 
-    // Server test
-    try {
+    // Server test — cleanup executor to prevent resource leaks (#247)
+    {
       const testExecutor = new PolyglotExecutor({ runtimes });
-      const result = await testExecutor.execute({ language: "javascript", code: 'console.log("ok");', timeout: 5000 });
-      if (result.exitCode === 0 && result.stdout.trim() === "ok") {
-        lines.push("- [x] Server test: PASS");
-      } else {
-        const detail = result.stderr?.trim() ? ` (${result.stderr.trim().slice(0, 200)})` : "";
-        lines.push(`- [ ] Server test: FAIL — exit ${result.exitCode}${detail}`);
+      try {
+        const result = await testExecutor.execute({ language: "javascript", code: 'console.log("ok");', timeout: 5000 });
+        if (result.exitCode === 0 && result.stdout.trim() === "ok") {
+          lines.push("- [x] Server test: PASS");
+        } else {
+          const detail = result.stderr?.trim() ? ` (${result.stderr.trim().slice(0, 200)})` : "";
+          lines.push(`- [ ] Server test: FAIL — exit ${result.exitCode}${detail}`);
+        }
+      } catch (err: unknown) {
+        lines.push(`- [ ] Server test: FAIL — ${err instanceof Error ? err.message : err}`);
+      } finally {
+        testExecutor.cleanupBackgrounded();
       }
-    } catch (err: unknown) {
-      lines.push(`- [ ] Server test: FAIL — ${err instanceof Error ? err.message : err}`);
     }
 
-    // FTS5 / SQLite
-    try {
-      const Database = loadDatabase();
-      const db = new Database(":memory:");
-      db.exec("CREATE VIRTUAL TABLE fts_test USING fts5(content)");
-      db.exec("INSERT INTO fts_test(content) VALUES ('hello world')");
-      const row = db.prepare("SELECT * FROM fts_test WHERE fts_test MATCH 'hello'").get() as { content: string } | undefined;
-      db.close();
-      if (row && row.content === "hello world") {
-        lines.push("- [x] FTS5 / SQLite: PASS — native module works");
-      } else {
-        lines.push("- [ ] FTS5 / SQLite: FAIL — unexpected result");
+    // FTS5 / SQLite — close in finally to prevent GC segfault (#247)
+    {
+      let testDb: ReturnType<typeof loadDatabase> extends (...args: any[]) => infer R ? R : never;
+      try {
+        const Database = loadDatabase();
+        testDb = new Database(":memory:");
+        testDb.exec("CREATE VIRTUAL TABLE fts_test USING fts5(content)");
+        testDb.exec("INSERT INTO fts_test(content) VALUES ('hello world')");
+        const row = testDb.prepare("SELECT * FROM fts_test WHERE fts_test MATCH 'hello'").get() as { content: string } | undefined;
+        if (row && row.content === "hello world") {
+          lines.push("- [x] FTS5 / SQLite: PASS — native module works");
+        } else {
+          lines.push("- [ ] FTS5 / SQLite: FAIL — unexpected result");
+        }
+      } catch (err: unknown) {
+        lines.push(`- [ ] FTS5 / SQLite: FAIL — ${err instanceof Error ? err.message : err}`);
+      } finally {
+        try { testDb!?.close(); } catch { /* best effort */ }
       }
-    } catch (err: unknown) {
-      lines.push(`- [ ] FTS5 / SQLite: FAIL — ${err instanceof Error ? err.message : err}`);
     }
 
     // Hook script
