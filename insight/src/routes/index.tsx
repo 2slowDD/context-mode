@@ -505,11 +505,12 @@ function Dashboard() {
             <div className="grid grid-cols-3 gap-4 mb-4">
               <Mini label="Projects" value={t.uniqueProjects} />
               <Mini label="Top Project" value={topProject?.project_dir?.split("/").pop() || "-"} color="text-emerald-500" />
-              <Mini label="Confidence" value={data.attribution?.avgConfidencePct != null ? `${data.attribution.avgConfidencePct}%` : "-"} color={data.attribution && data.attribution.avgConfidencePct >= 70 ? "text-emerald-500" : "text-amber-500"} />
+              <Mini label="Match Quality" value={data.attribution?.avgConfidencePct != null ? (data.attribution.avgConfidencePct >= 80 ? "Strong" : data.attribution.avgConfidencePct >= 55 ? "Fair" : "Weak") : "-"} color={data.attribution && data.attribution.avgConfidencePct >= 80 ? "text-emerald-500" : data.attribution && data.attribution.avgConfidencePct >= 55 ? "text-amber-500" : "text-red-400"} />
             </div>
             {data.attribution?.isFallbackOnly && (
-              <div className="mb-3 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/20 text-xs text-amber-400">
-                Session-level attribution only — per-event attribution improves with PostToolUse hooks
+              <div className="mb-3 px-3 py-2 rounded-md bg-muted/50 border border-border text-xs text-muted-foreground flex items-center gap-1.5">
+                <Lightbulb className="h-3 w-3 shrink-0" />
+                Limited tracking detail — project time is estimated from session data
               </div>
             )}
             <div className="space-y-2.5 pt-2 border-t border-border">
@@ -518,13 +519,16 @@ function Dashboard() {
                 const pct = Math.round((p.events / maxEv) * 100);
                 const name = p.project_dir?.split("/").filter(Boolean).slice(-2).join("/") || "Unknown";
                 const conf = p.avg_confidence != null ? Math.round(p.avg_confidence * 100) : null;
+                const qualityLabel = conf != null ? (conf >= 80 ? "Strong" : conf >= 55 ? "Fair" : "Weak") : null;
+                const qualityIcon = conf != null ? (conf >= 80 ? "✓" : conf >= 55 ? "~" : "!") : null;
+                const qualityColor = conf != null ? (conf >= 80 ? "text-emerald-500" : conf >= 55 ? "text-amber-500" : "text-red-400") : "";
                 return (
                   <div key={i}>
                     <div className="flex justify-between text-xs mb-1">
                       <span className="font-mono truncate max-w-[200px]">{name}</span>
                       <span className="text-muted-foreground tabular-nums">
-                        {p.sessions}s · {p.events}e
-                        {conf != null && <span className={`ml-1.5 ${conf >= 70 ? "text-emerald-500" : conf >= 50 ? "text-amber-500" : "text-red-400"}`}>{conf}%</span>}
+                        {p.sessions} sessions · {p.events} events
+                        {qualityLabel != null && <span className={`ml-1.5 text-[11px] font-medium ${qualityColor}`} title={`Match quality: ${conf}%`}>{qualityIcon} {qualityLabel}</span>}
                       </span>
                     </div>
                     <div className="h-1.5 bg-secondary rounded-full overflow-hidden">
