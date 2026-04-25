@@ -19,18 +19,18 @@
  *   - Session dir: ~/.gemini/context-mode/sessions/
  */
 
-import { createHash } from "node:crypto";
 import {
   readFileSync,
   writeFileSync,
   mkdirSync,
-  copyFileSync,
   accessSync,
   chmodSync,
   constants,
 } from "node:fs";
 import { resolve, join } from "node:path";
 import { homedir } from "node:os";
+
+import { BaseAdapter } from "../base.js";
 
 import type {
   HookAdapter,
@@ -76,7 +76,11 @@ import {
 // Adapter implementation
 // ─────────────────────────────────────────────────────────
 
-export class GeminiCLIAdapter implements HookAdapter {
+export class GeminiCLIAdapter extends BaseAdapter implements HookAdapter {
+  constructor() {
+    super([".gemini"]);
+  }
+
   readonly name = "Gemini CLI";
   readonly paradigm: HookParadigm = "json-stdio";
 
@@ -218,28 +222,6 @@ export class GeminiCLIAdapter implements HookAdapter {
 
   getSettingsPath(): string {
     return resolve(homedir(), ".gemini", "settings.json");
-  }
-
-  getSessionDir(): string {
-    const dir = join(homedir(), ".gemini", "context-mode", "sessions");
-    mkdirSync(dir, { recursive: true });
-    return dir;
-  }
-
-  getSessionDBPath(projectDir: string): string {
-    const hash = createHash("sha256")
-      .update(projectDir)
-      .digest("hex")
-      .slice(0, 16);
-    return join(this.getSessionDir(), `${hash}.db`);
-  }
-
-  getSessionEventsPath(projectDir: string): string {
-    const hash = createHash("sha256")
-      .update(projectDir)
-      .digest("hex")
-      .slice(0, 16);
-    return join(this.getSessionDir(), `${hash}-events.md`);
   }
 
   generateHookConfig(pluginRoot: string): HookRegistration {
@@ -485,18 +467,6 @@ export class GeminiCLIAdapter implements HookAdapter {
     settings.hooks = hooks;
     this.writeSettings(settings);
     return changes;
-  }
-
-  backupSettings(): string | null {
-    const settingsPath = this.getSettingsPath();
-    try {
-      accessSync(settingsPath, constants.R_OK);
-      const backupPath = settingsPath + ".bak";
-      copyFileSync(settingsPath, backupPath);
-      return backupPath;
-    } catch {
-      return null;
-    }
   }
 
   setHookPermissions(pluginRoot: string): string[] {

@@ -17,18 +17,16 @@
  *   - Tool list: System prompt leak (21 verified tools)
  */
 
-import { createHash } from "node:crypto";
 import {
   readFileSync,
   writeFileSync,
   mkdirSync,
-  copyFileSync,
-  accessSync,
-  constants,
 } from "node:fs";
-import { resolve, join, dirname } from "node:path";
+import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
+
+import { BaseAdapter } from "../base.js";
 
 import type {
   HookAdapter,
@@ -50,7 +48,11 @@ import type {
 // Adapter implementation
 // ─────────────────────────────────────────────────────────
 
-export class AntigravityAdapter implements HookAdapter {
+export class AntigravityAdapter extends BaseAdapter implements HookAdapter {
+  constructor() {
+    super([".gemini"]);
+  }
+
   readonly name = "Antigravity";
   readonly paradigm: HookParadigm = "mcp-only";
 
@@ -107,28 +109,6 @@ export class AntigravityAdapter implements HookAdapter {
 
   getSettingsPath(): string {
     return resolve(homedir(), ".gemini", "antigravity", "mcp_config.json");
-  }
-
-  getSessionDir(): string {
-    const dir = join(homedir(), ".gemini", "context-mode", "sessions");
-    mkdirSync(dir, { recursive: true });
-    return dir;
-  }
-
-  getSessionDBPath(projectDir: string): string {
-    const hash = createHash("sha256")
-      .update(projectDir)
-      .digest("hex")
-      .slice(0, 16);
-    return join(this.getSessionDir(), `${hash}.db`);
-  }
-
-  getSessionEventsPath(projectDir: string): string {
-    const hash = createHash("sha256")
-      .update(projectDir)
-      .digest("hex")
-      .slice(0, 16);
-    return join(this.getSessionDir(), `${hash}-events.md`);
   }
 
   generateHookConfig(_pluginRoot: string): HookRegistration {
@@ -215,17 +195,7 @@ export class AntigravityAdapter implements HookAdapter {
     return [];
   }
 
-  backupSettings(): string | null {
-    const settingsPath = this.getSettingsPath();
-    try {
-      accessSync(settingsPath, constants.R_OK);
-      const backupPath = settingsPath + ".bak";
-      copyFileSync(settingsPath, backupPath);
-      return backupPath;
-    } catch {
-      return null;
-    }
-  }
+
 
   setHookPermissions(_pluginRoot: string): string[] {
     return [];

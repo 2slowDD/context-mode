@@ -16,8 +16,6 @@
  *   - Session dir: ~/.config/opencode/context-mode/sessions/
  */
 
-import { createHash } from "node:crypto";
-
 /** Strip JSONC comments (// and /* *​/) and trailing commas for JSON.parse. */
 function stripJsonComments(str: string): string {
   return str
@@ -35,6 +33,8 @@ import {
 } from "node:fs";
 import { resolve, join } from "node:path";
 import { homedir } from "node:os";
+
+import { BaseAdapter } from "../base.js";
 
 import type {
   HookAdapter,
@@ -89,7 +89,7 @@ import { HOOK_TYPES as OPENCODE_HOOK_NAMES } from "./hooks.js";
 
 export type AdapterPlatformType = Extract<PlatformId, "opencode" | "kilo">;
 
-export class OpenCodeAdapter implements HookAdapter {
+export class OpenCodeAdapter extends BaseAdapter implements HookAdapter {
   get name(): string {
     return this.platform === "kilo" ? "KiloCode" : "OpenCode";
   }
@@ -109,6 +109,9 @@ export class OpenCodeAdapter implements HookAdapter {
   private platform: AdapterPlatformType;
 
   constructor(platform: AdapterPlatformType = "opencode") {
+    // sessionDirSegments unused — opencode overrides getSessionDir()
+    // with XDG_CONFIG_HOME / APPDATA logic
+    super([".config", platform]);
     this.platform = platform;
   }
 
@@ -259,22 +262,6 @@ export class OpenCodeAdapter implements HookAdapter {
     const dir = join(configDir, this.platform, "context-mode", "sessions");
     mkdirSync(dir, { recursive: true });
     return dir;
-  }
-
-  getSessionDBPath(projectDir: string): string {
-    const hash = createHash("sha256")
-      .update(projectDir)
-      .digest("hex")
-      .slice(0, 16);
-    return join(this.getSessionDir(), `${hash}.db`);
-  }
-
-  getSessionEventsPath(projectDir: string): string {
-    const hash = createHash("sha256")
-      .update(projectDir)
-      .digest("hex")
-      .slice(0, 16);
-    return join(this.getSessionDir(), `${hash}-events.md`);
   }
 
   generateHookConfig(_pluginRoot: string): HookRegistration {

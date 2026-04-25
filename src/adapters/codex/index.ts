@@ -14,17 +14,14 @@
  * Track: https://github.com/openai/codex/issues/18491
  */
 
-import { createHash } from "node:crypto";
 import {
   readFileSync,
-  mkdirSync,
-  copyFileSync,
-  accessSync,
-  constants,
 } from "node:fs";
-import { resolve, join, dirname } from "node:path";
+import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
+
+import { BaseAdapter } from "../base.js";
 
 import type {
   HookAdapter,
@@ -65,7 +62,11 @@ interface CodexHookInput {
 // Adapter implementation
 // ─────────────────────────────────────────────────────────
 
-export class CodexAdapter implements HookAdapter {
+export class CodexAdapter extends BaseAdapter implements HookAdapter {
+  constructor() {
+    super([".codex"]);
+  }
+
   readonly name = "Codex CLI";
   readonly paradigm: HookParadigm = "json-stdio";
 
@@ -205,28 +206,6 @@ export class CodexAdapter implements HookAdapter {
     return resolve(homedir(), ".codex", "config.toml");
   }
 
-  getSessionDir(): string {
-    const dir = join(homedir(), ".codex", "context-mode", "sessions");
-    mkdirSync(dir, { recursive: true });
-    return dir;
-  }
-
-  getSessionDBPath(projectDir: string): string {
-    const hash = createHash("sha256")
-      .update(projectDir)
-      .digest("hex")
-      .slice(0, 16);
-    return join(this.getSessionDir(), `${hash}.db`);
-  }
-
-  getSessionEventsPath(projectDir: string): string {
-    const hash = createHash("sha256")
-      .update(projectDir)
-      .digest("hex")
-      .slice(0, 16);
-    return join(this.getSessionDir(), `${hash}-events.md`);
-  }
-
   generateHookConfig(pluginRoot: string): HookRegistration {
     return {
       PreToolUse: [
@@ -350,17 +329,7 @@ export class CodexAdapter implements HookAdapter {
     return [];
   }
 
-  backupSettings(): string | null {
-    const settingsPath = this.getSettingsPath();
-    try {
-      accessSync(settingsPath, constants.R_OK);
-      const backupPath = settingsPath + ".bak";
-      copyFileSync(settingsPath, backupPath);
-      return backupPath;
-    } catch {
-      return null;
-    }
-  }
+
 
   setHookPermissions(_pluginRoot: string): string[] {
     // Hook permissions are set during plugin install

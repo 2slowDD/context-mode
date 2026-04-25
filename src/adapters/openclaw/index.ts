@@ -16,17 +16,17 @@
  *   - Session dir: ~/.openclaw/context-mode/sessions/
  */
 
-import { createHash } from "node:crypto";
 import {
   readFileSync,
   writeFileSync,
-  mkdirSync,
   copyFileSync,
   accessSync,
   constants,
 } from "node:fs";
 import { resolve, join } from "node:path";
 import { homedir } from "node:os";
+
+import { BaseAdapter } from "../base.js";
 
 import type {
   HookAdapter,
@@ -71,7 +71,11 @@ import { HOOK_EVENTS as OPENCLAW_HOOK_EVENTS } from "./hooks.js";
 // Adapter implementation
 // ─────────────────────────────────────────────────────────
 
-export class OpenClawAdapter implements HookAdapter {
+export class OpenClawAdapter extends BaseAdapter implements HookAdapter {
+  constructor() {
+    super([".openclaw"]);
+  }
+
   readonly name = "OpenClaw";
   readonly paradigm: HookParadigm = "ts-plugin";
 
@@ -199,28 +203,6 @@ export class OpenClawAdapter implements HookAdapter {
   getSettingsPath(): string {
     // OpenClaw uses openclaw.json in the project root or ~/.openclaw/openclaw.json
     return resolve("openclaw.json");
-  }
-
-  getSessionDir(): string {
-    const dir = join(homedir(), ".openclaw", "context-mode", "sessions");
-    mkdirSync(dir, { recursive: true });
-    return dir;
-  }
-
-  getSessionDBPath(projectDir: string): string {
-    const hash = createHash("sha256")
-      .update(projectDir)
-      .digest("hex")
-      .slice(0, 16);
-    return join(this.getSessionDir(), `${hash}.db`);
-  }
-
-  getSessionEventsPath(projectDir: string): string {
-    const hash = createHash("sha256")
-      .update(projectDir)
-      .digest("hex")
-      .slice(0, 16);
-    return join(this.getSessionDir(), `${hash}-events.md`);
   }
 
   generateHookConfig(_pluginRoot: string): HookRegistration {

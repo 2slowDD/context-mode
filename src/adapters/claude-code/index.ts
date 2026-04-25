@@ -14,20 +14,19 @@
  *   - Session dir: ~/.claude/context-mode/sessions/
  */
 
-import { createHash } from "node:crypto";
 import {
   readFileSync,
   writeFileSync,
-  mkdirSync,
-  copyFileSync,
-  accessSync,
   existsSync,
   readdirSync,
   chmodSync,
+  accessSync,
   constants,
 } from "node:fs";
 import { resolve, join } from "node:path";
 import { homedir } from "node:os";
+
+import { BaseAdapter } from "../base.js";
 
 import type {
   HookAdapter,
@@ -74,7 +73,11 @@ interface ClaudeCodeHookInput {
 // Adapter implementation
 // ─────────────────────────────────────────────────────────
 
-export class ClaudeCodeAdapter implements HookAdapter {
+export class ClaudeCodeAdapter extends BaseAdapter implements HookAdapter {
+  constructor() {
+    super([".claude"]);
+  }
+
   readonly name = "Claude Code";
   readonly paradigm: HookParadigm = "json-stdio";
 
@@ -199,28 +202,6 @@ export class ClaudeCodeAdapter implements HookAdapter {
 
   getSettingsPath(): string {
     return resolve(homedir(), ".claude", "settings.json");
-  }
-
-  getSessionDir(): string {
-    const dir = join(homedir(), ".claude", "context-mode", "sessions");
-    mkdirSync(dir, { recursive: true });
-    return dir;
-  }
-
-  getSessionDBPath(projectDir: string): string {
-    const hash = createHash("sha256")
-      .update(projectDir)
-      .digest("hex")
-      .slice(0, 16);
-    return join(this.getSessionDir(), `${hash}.db`);
-  }
-
-  getSessionEventsPath(projectDir: string): string {
-    const hash = createHash("sha256")
-      .update(projectDir)
-      .digest("hex")
-      .slice(0, 16);
-    return join(this.getSessionDir(), `${hash}-events.md`);
   }
 
   generateHookConfig(pluginRoot: string): HookRegistration {
@@ -625,18 +606,6 @@ export class ClaudeCodeAdapter implements HookAdapter {
     settings.hooks = hooks;
     this.writeSettings(settings);
     return changes;
-  }
-
-  backupSettings(): string | null {
-    const settingsPath = this.getSettingsPath();
-    try {
-      accessSync(settingsPath, constants.R_OK);
-      const backupPath = settingsPath + ".bak";
-      copyFileSync(settingsPath, backupPath);
-      return backupPath;
-    } catch {
-      return null;
-    }
   }
 
   setHookPermissions(pluginRoot: string): string[] {

@@ -22,12 +22,10 @@
  *   - Preview status — API may change
  */
 
-import { createHash } from "node:crypto";
 import {
   readFileSync,
   writeFileSync,
   mkdirSync,
-  copyFileSync,
   accessSync,
   existsSync,
   chmodSync,
@@ -35,6 +33,8 @@ import {
 } from "node:fs";
 import { resolve, join } from "node:path";
 import { homedir } from "node:os";
+
+import { BaseAdapter } from "../base.js";
 
 import type {
   HookAdapter,
@@ -81,7 +81,13 @@ import {
 // Adapter implementation
 // ─────────────────────────────────────────────────────────
 
-export class VSCodeCopilotAdapter implements HookAdapter {
+export class VSCodeCopilotAdapter extends BaseAdapter implements HookAdapter {
+  constructor() {
+    // sessionDirSegments unused — vscode-copilot overrides getSessionDir()
+    // with .github directory detection fallback logic
+    super([".vscode"]);
+  }
+
   readonly name = "VS Code Copilot";
   readonly paradigm: HookParadigm = "json-stdio";
 
@@ -249,22 +255,6 @@ export class VSCodeCopilotAdapter implements HookAdapter {
     const dir = existsSync(resolve(".github")) ? githubDir : fallbackDir;
     mkdirSync(dir, { recursive: true });
     return dir;
-  }
-
-  getSessionDBPath(projectDir: string): string {
-    const hash = createHash("sha256")
-      .update(projectDir)
-      .digest("hex")
-      .slice(0, 16);
-    return join(this.getSessionDir(), `${hash}.db`);
-  }
-
-  getSessionEventsPath(projectDir: string): string {
-    const hash = createHash("sha256")
-      .update(projectDir)
-      .digest("hex")
-      .slice(0, 16);
-    return join(this.getSessionDir(), `${hash}-events.md`);
   }
 
   generateHookConfig(pluginRoot: string): HookRegistration {
@@ -541,18 +531,6 @@ export class VSCodeCopilotAdapter implements HookAdapter {
     changes.push(`Wrote hook config to ${outputPath}`);
 
     return changes;
-  }
-
-  backupSettings(): string | null {
-    const settingsPath = this.getSettingsPath();
-    try {
-      accessSync(settingsPath, constants.R_OK);
-      const backupPath = settingsPath + ".bak";
-      copyFileSync(settingsPath, backupPath);
-      return backupPath;
-    } catch {
-      return null;
-    }
   }
 
   setHookPermissions(pluginRoot: string): string[] {

@@ -5,12 +5,10 @@
  * `.cursor/hooks.json` / `~/.cursor/hooks.json`.
  */
 
-import { createHash } from "node:crypto";
 import {
   readFileSync,
   writeFileSync,
   mkdirSync,
-  copyFileSync,
   accessSync,
   chmodSync,
   constants,
@@ -19,6 +17,8 @@ import {
 import { execSync } from "node:child_process";
 import { resolve, join } from "node:path";
 import { homedir } from "node:os";
+
+import { BaseAdapter } from "../base.js";
 
 import type {
   HookAdapter,
@@ -74,7 +74,11 @@ interface CursorHooksFile {
 
 const CURSOR_ENTERPRISE_HOOKS_PATH = "/Library/Application Support/Cursor/hooks.json";
 
-export class CursorAdapter implements HookAdapter {
+export class CursorAdapter extends BaseAdapter implements HookAdapter {
+  constructor() {
+    super([".cursor"]);
+  }
+
   readonly name = "Cursor";
   readonly paradigm: HookParadigm = "json-stdio";
 
@@ -207,28 +211,6 @@ export class CursorAdapter implements HookAdapter {
 
   getSettingsPath(): string {
     return resolve(".cursor", "hooks.json");
-  }
-
-  getSessionDir(): string {
-    const dir = join(homedir(), ".cursor", "context-mode", "sessions");
-    mkdirSync(dir, { recursive: true });
-    return dir;
-  }
-
-  getSessionDBPath(projectDir: string): string {
-    const hash = createHash("sha256")
-      .update(projectDir)
-      .digest("hex")
-      .slice(0, 16);
-    return join(this.getSessionDir(), `${hash}.db`);
-  }
-
-  getSessionEventsPath(projectDir: string): string {
-    const hash = createHash("sha256")
-      .update(projectDir)
-      .digest("hex")
-      .slice(0, 16);
-    return join(this.getSessionDir(), `${hash}-events.md`);
   }
 
   generateHookConfig(_pluginRoot: string): HookRegistration {
@@ -462,17 +444,7 @@ export class CursorAdapter implements HookAdapter {
     return changes;
   }
 
-  backupSettings(): string | null {
-    const settingsPath = this.getSettingsPath();
-    try {
-      accessSync(settingsPath, constants.R_OK);
-      const backupPath = settingsPath + ".bak";
-      copyFileSync(settingsPath, backupPath);
-      return backupPath;
-    } catch {
-      return null;
-    }
-  }
+
 
   setHookPermissions(pluginRoot: string): string[] {
     const set: string[] = [];

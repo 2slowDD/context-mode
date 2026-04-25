@@ -18,18 +18,18 @@
  *   - CLI hooks: https://kiro.dev/docs/cli/custom-agents/configuration-reference#hooks-field
  */
 
-import { createHash } from "node:crypto";
 import {
   readFileSync,
   writeFileSync,
   mkdirSync,
-  copyFileSync,
   accessSync,
   constants,
 } from "node:fs";
-import { resolve, join, dirname } from "node:path";
+import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
+
+import { BaseAdapter } from "../base.js";
 
 import {
   HOOK_TYPES as KIRO_HOOK_TYPES,
@@ -70,7 +70,11 @@ interface KiroCLIHookInput {
 // Adapter implementation
 // ─────────────────────────────────────────────────────────
 
-export class KiroAdapter implements HookAdapter {
+export class KiroAdapter extends BaseAdapter implements HookAdapter {
+  constructor() {
+    super([".kiro"]);
+  }
+
   readonly name = "Kiro";
   readonly paradigm: HookParadigm = "json-stdio";
 
@@ -151,28 +155,6 @@ export class KiroAdapter implements HookAdapter {
 
   getSettingsPath(): string {
     return resolve(homedir(), ".kiro", "settings", "mcp.json");
-  }
-
-  getSessionDir(): string {
-    const dir = join(homedir(), ".kiro", "context-mode", "sessions");
-    mkdirSync(dir, { recursive: true });
-    return dir;
-  }
-
-  getSessionDBPath(projectDir: string): string {
-    const hash = createHash("sha256")
-      .update(projectDir)
-      .digest("hex")
-      .slice(0, 16);
-    return join(this.getSessionDir(), `${hash}.db`);
-  }
-
-  getSessionEventsPath(projectDir: string): string {
-    const hash = createHash("sha256")
-      .update(projectDir)
-      .digest("hex")
-      .slice(0, 16);
-    return join(this.getSessionDir(), `${hash}-events.md`);
   }
 
   generateHookConfig(pluginRoot: string): HookRegistration {
@@ -350,18 +332,6 @@ export class KiroAdapter implements HookAdapter {
     }
 
     return changes;
-  }
-
-  backupSettings(): string | null {
-    const settingsPath = this.getSettingsPath();
-    try {
-      accessSync(settingsPath, constants.R_OK);
-      const backupPath = settingsPath + ".bak";
-      copyFileSync(settingsPath, backupPath);
-      return backupPath;
-    } catch {
-      return null;
-    }
   }
 
   setHookPermissions(_pluginRoot: string): string[] {
