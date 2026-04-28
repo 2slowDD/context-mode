@@ -568,6 +568,7 @@ function generateCategoryInsights(c: CategoryAnalyticsData): Insight[] {
 function Dashboard() {
   const [data, setData] = useState<AnalyticsData | null>(null);
   const [catData, setCatData] = useState<CategoryAnalyticsData | null>(null);
+  const [showAllInsights, setShowAllInsights] = useState(false);
   useEffect(() => {
     api.analytics().then(setData);
     api.categoryAnalytics().then(setCatData).catch(() => {}); // graceful — catData stays null, sections hidden
@@ -580,7 +581,6 @@ function Dashboard() {
   // Sort: critical first, then warning, positive, neutral
   const SEV_ORDER = { critical: 0, warning: 1, positive: 2, neutral: 3 };
   allInsights.sort((a, b) => (SEV_ORDER[a.severity] ?? 4) - (SEV_ORDER[b.severity] ?? 4));
-  const [showAllInsights, setShowAllInsights] = useState(false);
   const insights = showAllInsights ? allInsights : allInsights.slice(0, 8);
 
   // Compute derived values
