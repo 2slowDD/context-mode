@@ -37,31 +37,51 @@ describe("AntigravityAdapter", () => {
     });
   });
 
-  // ── Parse methods (all throw) ─────────────────────────
+  // ── Parse methods ──────────────────────────────────────
+  // Antigravity is mcp-only — parsers should never be invoked in
+  // normal operation because capability flags are all false. They
+  // exist as safe defaults so a misconfigured caller cannot leak
+  // undefined projectDir downstream.
 
   describe("parse methods", () => {
-    it("parsePreToolUseInput throws", () => {
-      expect(() => adapter.parsePreToolUseInput({})).toThrow(
-        /Antigravity does not support hooks/,
-      );
+    it("parsePreToolUseInput resolves projectDir from input.cwd", () => {
+      const event = adapter.parsePreToolUseInput({ cwd: "/wire/proj" });
+      expect(event.projectDir).toBe("/wire/proj");
     });
 
-    it("parsePostToolUseInput throws", () => {
-      expect(() => adapter.parsePostToolUseInput({})).toThrow(
-        /Antigravity does not support hooks/,
-      );
+    it("parsePreToolUseInput falls back to ANTIGRAVITY_PROJECT_DIR", () => {
+      const saved = process.env.ANTIGRAVITY_PROJECT_DIR;
+      process.env.ANTIGRAVITY_PROJECT_DIR = "/env/proj";
+      try {
+        const event = adapter.parsePreToolUseInput({});
+        expect(event.projectDir).toBe("/env/proj");
+      } finally {
+        if (saved === undefined) delete process.env.ANTIGRAVITY_PROJECT_DIR;
+        else process.env.ANTIGRAVITY_PROJECT_DIR = saved;
+      }
     });
 
-    it("parsePreCompactInput throws", () => {
-      expect(() => adapter.parsePreCompactInput({})).toThrow(
-        /Antigravity does not support hooks/,
-      );
+    it("parsePreToolUseInput falls back to process.cwd() when env+input missing", () => {
+      const saved = process.env.ANTIGRAVITY_PROJECT_DIR;
+      delete process.env.ANTIGRAVITY_PROJECT_DIR;
+      try {
+        const event = adapter.parsePreToolUseInput({});
+        expect(event.projectDir).toBe(process.cwd());
+      } finally {
+        if (saved !== undefined) process.env.ANTIGRAVITY_PROJECT_DIR = saved;
+      }
     });
 
-    it("parseSessionStartInput throws", () => {
-      expect(() => adapter.parseSessionStartInput({})).toThrow(
-        /Antigravity does not support hooks/,
-      );
+    it("post / preCompact / sessionStart parsers also fall back to process.cwd()", () => {
+      const saved = process.env.ANTIGRAVITY_PROJECT_DIR;
+      delete process.env.ANTIGRAVITY_PROJECT_DIR;
+      try {
+        expect(adapter.parsePostToolUseInput({}).projectDir).toBe(process.cwd());
+        expect(adapter.parsePreCompactInput({}).projectDir).toBe(process.cwd());
+        expect(adapter.parseSessionStartInput({}).projectDir).toBe(process.cwd());
+      } finally {
+        if (saved !== undefined) process.env.ANTIGRAVITY_PROJECT_DIR = saved;
+      }
     });
   });
 

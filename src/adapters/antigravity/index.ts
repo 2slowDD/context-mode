@@ -45,6 +45,20 @@ import type {
 } from "../types.js";
 
 // ─────────────────────────────────────────────────────────
+// Antigravity raw input types (defensive — Antigravity is mcp-only)
+// ─────────────────────────────────────────────────────────
+
+interface AntigravityHookInput {
+  tool_name?: string;
+  tool_input?: Record<string, unknown>;
+  tool_output?: string;
+  is_error?: boolean;
+  session_id?: string;
+  source?: string;
+  cwd?: string;
+}
+
+// ─────────────────────────────────────────────────────────
 // Adapter implementation
 // ─────────────────────────────────────────────────────────
 
@@ -67,23 +81,71 @@ export class AntigravityAdapter extends BaseAdapter implements HookAdapter {
   };
 
   // ── Input parsing ──────────────────────────────────────
-  // Antigravity does not support hooks. These methods exist to satisfy the
-  // interface contract but will throw if called.
+  // Antigravity is mcp-only and capability flags are all false, so
+  // these parsers should never be exercised in normal operation. They
+  // exist as defensive defaults so a misconfigured caller does not
+  // leak undefined projectDir downstream — the standard fallback chain
+  // (input.cwd > ANTIGRAVITY_PROJECT_DIR > process.cwd()) keeps hooks
+  // safe under worktrees / non-default cwd, matching cursor / opencode.
 
-  parsePreToolUseInput(_raw: unknown): PreToolUseEvent {
-    throw new Error("Antigravity does not support hooks");
+  parsePreToolUseInput(raw: unknown): PreToolUseEvent {
+    const input = raw as AntigravityHookInput;
+    return {
+      toolName: input.tool_name ?? "",
+      toolInput: input.tool_input ?? {},
+      sessionId: this.extractSessionId(input),
+      projectDir: this.getProjectDir(input),
+      raw,
+    };
   }
 
-  parsePostToolUseInput(_raw: unknown): PostToolUseEvent {
-    throw new Error("Antigravity does not support hooks");
+  parsePostToolUseInput(raw: unknown): PostToolUseEvent {
+    const input = raw as AntigravityHookInput;
+    return {
+      toolName: input.tool_name ?? "",
+      toolInput: input.tool_input ?? {},
+      toolOutput: input.tool_output,
+      isError: input.is_error,
+      sessionId: this.extractSessionId(input),
+      projectDir: this.getProjectDir(input),
+      raw,
+    };
   }
 
-  parsePreCompactInput(_raw: unknown): PreCompactEvent {
-    throw new Error("Antigravity does not support hooks");
+  parsePreCompactInput(raw: unknown): PreCompactEvent {
+    const input = raw as AntigravityHookInput;
+    return {
+      sessionId: this.extractSessionId(input),
+      projectDir: this.getProjectDir(input),
+      raw,
+    };
   }
 
-  parseSessionStartInput(_raw: unknown): SessionStartEvent {
-    throw new Error("Antigravity does not support hooks");
+  parseSessionStartInput(raw: unknown): SessionStartEvent {
+    const input = raw as AntigravityHookInput;
+    const rawSource = input.source ?? "startup";
+
+    let source: SessionStartEvent["source"];
+    switch (rawSource) {
+      case "compact":
+        source = "compact";
+        break;
+      case "resume":
+        source = "resume";
+        break;
+      case "clear":
+        source = "clear";
+        break;
+      default:
+        source = "startup";
+    }
+
+    return {
+      sessionId: this.extractSessionId(input),
+      source,
+      projectDir: this.getProjectDir(input),
+      raw,
+    };
   }
 
   // ── Response formatting ────────────────────────────────
@@ -229,5 +291,24 @@ export class AntigravityAdapter extends BaseAdapter implements HookAdapter {
     } catch {
       return "# context-mode\n\nUse context-mode MCP tools (execute, execute_file, batch_execute, fetch_and_index, search) instead of run_command/view_file for data-heavy operations.";
     }
+  }
+
+  // ── Internal helpers ───────────────────────────────────
+
+  /**
+   * Resolve the project directory for an Antigravity hook input.
+   * Priority: input.cwd > ANTIGRAVITY_PROJECT_DIR env > process.cwd().
+   * Mirrors the cursor / opencode pattern so any caller that bypasses
+   * the capability flags still receives a defined projectDir.
+   */
+  private getProjectDir(input: AntigravityHookInput): string {
+    return (
+      input.cwd ?? process.env.ANTIGRAVITY_PROJECT_DIR ?? process.cwd()
+    );
+  }
+
+  private extractSessionId(input: AntigravityHookInput): string {
+    if (input.session_id) return input.session_id;
+    return `pid-${process.ppid}`;
   }
 }
