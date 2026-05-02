@@ -39,20 +39,6 @@ import type {
 } from "../types.js";
 
 // ─────────────────────────────────────────────────────────
-// Zed raw input types (defensive — Zed is mcp-only)
-// ─────────────────────────────────────────────────────────
-
-interface ZedHookInput {
-  tool_name?: string;
-  tool_input?: Record<string, unknown>;
-  tool_output?: string;
-  is_error?: boolean;
-  session_id?: string;
-  source?: string;
-  cwd?: string;
-}
-
-// ─────────────────────────────────────────────────────────
 // Adapter implementation
 // ─────────────────────────────────────────────────────────
 
@@ -75,71 +61,23 @@ export class ZedAdapter extends BaseAdapter implements HookAdapter {
   };
 
   // ── Input parsing ──────────────────────────────────────
-  // Zed is mcp-only and capabilities flags are all false, so these
-  // parsers should never be exercised in normal operation. They exist
-  // as defensive defaults so a misconfigured caller does not leak
-  // undefined projectDir downstream — the standard fallback chain
-  // (input.cwd > ZED_PROJECT_DIR > process.cwd()) keeps hooks safe
-  // under worktrees / non-default cwd, matching cursor / opencode.
+  // Zed does not support hooks. These methods exist to satisfy the
+  // interface contract but will throw if called.
 
-  parsePreToolUseInput(raw: unknown): PreToolUseEvent {
-    const input = raw as ZedHookInput;
-    return {
-      toolName: input.tool_name ?? "",
-      toolInput: input.tool_input ?? {},
-      sessionId: this.extractSessionId(input),
-      projectDir: this.getProjectDir(input),
-      raw,
-    };
+  parsePreToolUseInput(_raw: unknown): PreToolUseEvent {
+    throw new Error("Zed does not support hooks");
   }
 
-  parsePostToolUseInput(raw: unknown): PostToolUseEvent {
-    const input = raw as ZedHookInput;
-    return {
-      toolName: input.tool_name ?? "",
-      toolInput: input.tool_input ?? {},
-      toolOutput: input.tool_output,
-      isError: input.is_error,
-      sessionId: this.extractSessionId(input),
-      projectDir: this.getProjectDir(input),
-      raw,
-    };
+  parsePostToolUseInput(_raw: unknown): PostToolUseEvent {
+    throw new Error("Zed does not support hooks");
   }
 
-  parsePreCompactInput(raw: unknown): PreCompactEvent {
-    const input = raw as ZedHookInput;
-    return {
-      sessionId: this.extractSessionId(input),
-      projectDir: this.getProjectDir(input),
-      raw,
-    };
+  parsePreCompactInput(_raw: unknown): PreCompactEvent {
+    throw new Error("Zed does not support hooks");
   }
 
-  parseSessionStartInput(raw: unknown): SessionStartEvent {
-    const input = raw as ZedHookInput;
-    const rawSource = input.source ?? "startup";
-
-    let source: SessionStartEvent["source"];
-    switch (rawSource) {
-      case "compact":
-        source = "compact";
-        break;
-      case "resume":
-        source = "resume";
-        break;
-      case "clear":
-        source = "clear";
-        break;
-      default:
-        source = "startup";
-    }
-
-    return {
-      sessionId: this.extractSessionId(input),
-      source,
-      projectDir: this.getProjectDir(input),
-      raw,
-    };
+  parseSessionStartInput(_raw: unknown): SessionStartEvent {
+    throw new Error("Zed does not support hooks");
   }
 
   // ── Response formatting ────────────────────────────────
@@ -283,22 +221,5 @@ export class ZedAdapter extends BaseAdapter implements HookAdapter {
       // Fallback inline instructions
       return "# context-mode\n\nUse context-mode MCP tools (execute, execute_file, batch_execute, fetch_and_index, search) instead of bash/cat/curl for data-heavy operations.";
     }
-  }
-
-  // ── Internal helpers ───────────────────────────────────
-
-  /**
-   * Resolve the project directory for a Zed hook input.
-   * Priority: input.cwd > ZED_PROJECT_DIR env > process.cwd().
-   * Mirrors the cursor / opencode pattern so any caller that bypasses
-   * the capability flags still receives a defined projectDir.
-   */
-  private getProjectDir(input: ZedHookInput): string {
-    return input.cwd ?? process.env.ZED_PROJECT_DIR ?? process.cwd();
-  }
-
-  private extractSessionId(input: ZedHookInput): string {
-    if (input.session_id) return input.session_id;
-    return `pid-${process.ppid}`;
   }
 }
