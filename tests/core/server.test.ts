@@ -2606,6 +2606,111 @@ describe("ctx_fetch_and_index batch refactor", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+// SSRF guard — ctx_fetch_and_index URL/IP allowlist (PR #401 ops review)
+// ═══════════════════════════════════════════════════════════════════════════
+
+import { classifyIp } from "../../src/server.js";
+
+describe("classifyIp — SSRF guard IP classifier", () => {
+  test("hard-blocks IMDS / link-local IPv4 (169.254.0.0/16)", () => {
+    // 169.254.169.254 = AWS/GCP/Azure cloud metadata endpoint — never legitimate
+    expect(classifyIp("169.254.169.254")).toBe("block");
+    expect(classifyIp("169.254.0.1")).toBe("block");
+    expect(classifyIp("169.254.255.254")).toBe("block");
+  });
+
+  test("hard-blocks multicast / reserved IPv4 (224+ and 0.0.0.0/8)", () => {
+    expect(classifyIp("224.0.0.1")).toBe("block");
+    expect(classifyIp("239.255.255.255")).toBe("block");
+    expect(classifyIp("255.255.255.255")).toBe("block");
+    expect(classifyIp("0.0.0.0")).toBe("block");
+    expect(classifyIp("0.1.2.3")).toBe("block");
+  });
+
+  test("hard-blocks malformed IPv4", () => {
+    expect(classifyIp("999.999.999.999")).toBe("block");
+    expect(classifyIp("not-an-ip")).toBe("block");
+    expect(classifyIp("1.2.3")).toBe("block");
+  });
+
+  test("hard-blocks IPv6 link-local + multicast + unspecified", () => {
+    expect(classifyIp("fe80::1")).toBe("block"); // link-local
+    expect(classifyIp("ff00::1")).toBe("block"); // multicast
+    expect(classifyIp("::")).toBe("block");      // unspecified
+  });
+
+  test("private (allow by default, block under strict mode): RFC1918 + loopback IPv4", () => {
+    // Allowed by default — developer's local dev server / internal network
+    expect(classifyIp("127.0.0.1")).toBe("private");
+    expect(classifyIp("127.255.255.255")).toBe("private");
+    expect(classifyIp("10.0.0.5")).toBe("private");
+    expect(classifyIp("10.255.255.255")).toBe("private");
+    expect(classifyIp("172.16.0.1")).toBe("private");
+    expect(classifyIp("172.31.255.255")).toBe("private");
+    expect(classifyIp("172.15.0.1")).toBe("public");  // outside RFC1918
+    expect(classifyIp("172.32.0.1")).toBe("public");  // outside RFC1918
+    expect(classifyIp("192.168.1.1")).toBe("private");
+    expect(classifyIp("192.168.255.255")).toBe("private");
+  });
+
+  test("private: IPv6 loopback + ULA (fc00::/7)", () => {
+    expect(classifyIp("::1")).toBe("private");
+    expect(classifyIp("fc00::1")).toBe("private");
+    expect(classifyIp("fd12:3456:789a::1")).toBe("private");
+  });
+
+  test("public: real internet IPs", () => {
+    expect(classifyIp("8.8.8.8")).toBe("public");           // Google DNS
+    expect(classifyIp("1.1.1.1")).toBe("public");           // Cloudflare DNS
+    expect(classifyIp("140.82.121.4")).toBe("public");      // github.com
+    expect(classifyIp("2001:4860:4860::8888")).toBe("public"); // Google DNS IPv6
+  });
+
+  test("IPv4-mapped IPv6 recurses through IPv4 classifier", () => {
+    // ::ffff:127.0.0.1 is just 127.0.0.1 wrapped in IPv6 mapping
+    expect(classifyIp("::ffff:127.0.0.1")).toBe("private");
+    expect(classifyIp("::ffff:169.254.169.254")).toBe("block"); // IMDS via IPv4-mapped
+    expect(classifyIp("::ffff:8.8.8.8")).toBe("public");
+  });
+});
+
+describe("SSRF guard — ssrfGuard policy in src/server.ts", () => {
+  const serverSrc = readFileSync(
+    resolve(__dirname, "../../src/server.ts"),
+    "utf-8",
+  );
+
+  test("allowlists only http: and https: schemes", () => {
+    expect(serverSrc).toContain('parsed.protocol !== "http:"');
+    expect(serverSrc).toContain('parsed.protocol !== "https:"');
+    // file:// / gopher:// / javascript: implicitly rejected
+  });
+
+  test("blocks IPs classified as block (link-local/IMDS/multicast)", () => {
+    expect(serverSrc).toContain('verdict === "block"');
+    expect(serverSrc).toContain("link-local / IMDS / multicast / reserved");
+  });
+
+  test("strict mode opt-in via CTX_FETCH_STRICT=1", () => {
+    expect(serverSrc).toContain('process.env.CTX_FETCH_STRICT === "1"');
+    expect(serverSrc).toContain('verdict === "private" && strict');
+  });
+
+  test("ssrfGuard runs BEFORE cache lookup (poisoned cache defense)", () => {
+    // fetchOneUrl must call ssrfGuard before getSourceMeta — otherwise a
+    // previously-poisoned source label could serve attacker content from cache.
+    const fetchOneSrc = serverSrc.match(/async function fetchOneUrl\([\s\S]+?^}/m);
+    expect(fetchOneSrc).not.toBeNull();
+    const block = fetchOneSrc![0];
+    const guardIdx = block.indexOf("ssrfGuard");
+    const cacheIdx = block.indexOf("getSourceMeta");
+    expect(guardIdx).toBeGreaterThan(-1);
+    expect(cacheIdx).toBeGreaterThan(-1);
+    expect(guardIdx).toBeLessThan(cacheIdx);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 // ctx_doctor resource cleanup regression (#247)
 // ═══════════════════════════════════════════════════════════════════════════
 

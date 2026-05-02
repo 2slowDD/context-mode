@@ -65,13 +65,18 @@ describe("runtime version reporting", () => {
 
 describe("SHELL env var override", () => {
   let tmpDir: string;
-  let fakeShell: string;
+  let allowlistedShell: string;
+  let nonAllowlistedShell: string;
   const originalShell = process.env.SHELL;
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "ctx-shell-"));
-    fakeShell = join(tmpDir, "fake-bash");
-    writeFileSync(fakeShell, "#!/bin/sh\necho fake\n", { mode: 0o755 });
+    // Allowlisted basename — matches isAllowlistedShell regex
+    allowlistedShell = join(tmpDir, "bash");
+    writeFileSync(allowlistedShell, "#!/bin/sh\necho fake\n", { mode: 0o755 });
+    // Non-allowlisted basename — exists but rejected by allowlist
+    nonAllowlistedShell = join(tmpDir, "python");
+    writeFileSync(nonAllowlistedShell, "#!/bin/sh\necho python\n", { mode: 0o755 });
   });
 
   afterEach(() => {
@@ -81,11 +86,42 @@ describe("SHELL env var override", () => {
     vi.resetModules();
   });
 
-  test("SHELL env var overrides shell when path exists", async () => {
-    process.env.SHELL = fakeShell;
+  test("SHELL env var overrides shell when path exists AND basename is allowlisted", async () => {
+    process.env.SHELL = allowlistedShell;
     const { detectRuntimes } = await import("../src/runtime.js");
     const r = detectRuntimes();
-    expect(r.shell).toBe(fakeShell);
+    expect(r.shell).toBe(allowlistedShell);
+  });
+
+  test("SHELL env var REJECTED when basename not in allowlist (security)", async () => {
+    // PR #401 ops review: SHELL=/usr/bin/python (or any non-shell binary) must
+    // NOT be honored. Otherwise an attacker who controls a profile script can
+    // redirect the executor to an arbitrary binary.
+    process.env.SHELL = nonAllowlistedShell;
+    const { detectRuntimes } = await import("../src/runtime.js");
+    const r = detectRuntimes();
+    expect(r.shell).not.toBe(nonAllowlistedShell);
+    expect(r.shell.length).toBeGreaterThan(0); // falls back to platform detection
+  });
+
+  test("isAllowlistedShell accepts bash/sh/zsh/dash/pwsh/powershell/cmd", async () => {
+    const { isAllowlistedShell } = await import("../src/runtime.js");
+    expect(isAllowlistedShell("/bin/bash")).toBe(true);
+    expect(isAllowlistedShell("/bin/sh")).toBe(true);
+    expect(isAllowlistedShell("/usr/local/bin/zsh")).toBe(true);
+    expect(isAllowlistedShell("/bin/dash")).toBe(true);
+    expect(isAllowlistedShell("/usr/bin/pwsh")).toBe(true);
+    expect(isAllowlistedShell("C:\\Windows\\System32\\cmd.exe")).toBe(true);
+    expect(isAllowlistedShell("C:\\Program Files\\PowerShell\\7\\pwsh.exe")).toBe(true);
+  });
+
+  test("isAllowlistedShell rejects non-shell binaries", async () => {
+    const { isAllowlistedShell } = await import("../src/runtime.js");
+    expect(isAllowlistedShell("/usr/bin/python")).toBe(false);
+    expect(isAllowlistedShell("/usr/bin/node")).toBe(false);
+    expect(isAllowlistedShell("/usr/bin/curl")).toBe(false);
+    expect(isAllowlistedShell("/tmp/evil-script")).toBe(false);
+    expect(isAllowlistedShell("/bin/bash-with-suffix")).toBe(false);
   });
 
   test("SHELL env var ignored when path does not exist", async () => {

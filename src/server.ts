@@ -34,7 +34,7 @@ import { searchAllSources } from "./search/unified.js";
 import { buildNodeCommand, type HookAdapter } from "./adapters/types.js";
 import { detectPlatform, getSessionDirSegments } from "./adapters/detect.js";
 import { loadDatabase } from "./db-base.js";
-import { AnalyticsEngine, formatReport, getLifetimeStats } from "./session/analytics.js";
+import { AnalyticsEngine, formatReport, getLifetimeStats, OPUS_INPUT_PRICE_PER_TOKEN } from "./session/analytics.js";
 const __pkg_dir = dirname(fileURLToPath(import.meta.url));
 const VERSION: string = (() => {
   for (const rel of ["../package.json", "./package.json"]) {
@@ -394,7 +394,14 @@ function trackIndexed(bytes: number): void {
 // ─────────────────────────────────────────────────────────
 
 const STATS_PERSIST_THROTTLE_MS = 500;
-const OPUS_INPUT_PRICE_PER_TOKEN = 15 / 1_000_000;
+// Schema version for the persisted stats payload (~/.claude/context-mode/sessions/stats-*.json).
+// Bump when a field is added/renamed/removed. Statusline reads `schemaVersion ?? 0` and warns when
+// it sees a future schema, so legacy bundles degrade gracefully on upgrade rather than silently
+// rendering missing fields (PR #401 architect review P1.3).
+const STATS_SCHEMA_VERSION = 1;
+// OPUS_INPUT_PRICE_PER_TOKEN intentionally NOT defined here — single source in
+// src/session/analytics.ts re-exported above. (P1.1 — pricing constant dedup,
+// PR #401 architect + ops 2-vote convergence.)
 let _lastStatsPersist = 0;
 
 /**
@@ -442,6 +449,7 @@ function persistStats(): void {
     // only render. Re-add when an analytics aggregator returns to next.
 
     const payload = {
+      schemaVersion: STATS_SCHEMA_VERSION,
       version: VERSION,
       updated_at: now,
       session_start: sessionStats.sessionStart,
@@ -1771,7 +1779,139 @@ type FetchOneResult =
  * Performs zero SQLite writes (only reads source meta). Caller must funnel
  * fetched results through `indexFetched` serially to avoid FTS5 WAL contention.
  */
+/**
+ * SSRF guard for ctx_fetch_and_index: validate URL scheme + resolve target IP +
+ * block link-local / IMDS / multicast / reserved IP ranges. Returns null if
+ * safe; returns a FetchOneResult fetch_error if blocked.
+ *
+ * Policy (PR #401 ops review, developer-friendly default):
+ *
+ * **HARD BLOCK** (no legitimate dev workflow):
+ *   - file://, gopher://, javascript:, data: schemes (only http: and https:)
+ *   - 169.254.0.0/16 link-local (INCLUDES 169.254.169.254 = AWS/GCP/Azure IMDS
+ *     cloud credential endpoint — high-value target for indirect prompt injection)
+ *   - IPv6 link-local fe80::/10
+ *   - Multicast (224+ IPv4, ff00::/8 IPv6) and reserved (0.0.0.0/8) ranges
+ *
+ * **ALLOW by default** (legitimate developer use cases dominate):
+ *   - localhost, 127.x.x.x, ::1 (local dev servers — Next.js, Vite, Postgres, …)
+ *   - 10.x, 172.16-31.x, 192.168.x RFC1918 private (developer's internal network)
+ *
+ * **STRICT MODE** opt-in via env var: `CTX_FETCH_STRICT=1`
+ *   - Blocks loopback + RFC1918 too
+ *   - For hosted/CI environments where the runtime isn't the user's own machine
+ *
+ * DNS resolution is performed against the resolved IP (not just URL parse) so a
+ * hostname like `evil.com` pointing to 169.254.169.254 is rejected — defends
+ * against attacker-controlled DNS records and DNS rebinding.
+ */
+async function ssrfGuard(rawUrl: string): Promise<FetchOneResult | null> {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return { kind: "fetch_error", url: rawUrl, error: "invalid URL", reason: "exit" };
+  }
+
+  // 1. Scheme allowlist — http and https only
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return {
+      kind: "fetch_error",
+      url: rawUrl,
+      error: `URL scheme "${parsed.protocol}" not allowed (only http: and https:)`,
+      reason: "exit",
+    };
+  }
+
+  const strict = process.env.CTX_FETCH_STRICT === "1";
+
+  // 2. DNS resolve + check IP ranges (hard-block + optional strict-mode block)
+  try {
+    const { lookup } = await import("node:dns/promises");
+    const records = await lookup(parsed.hostname, { all: true, verbatim: true });
+    for (const rec of records) {
+      const verdict = classifyIp(rec.address);
+      if (verdict === "block") {
+        return {
+          kind: "fetch_error",
+          url: rawUrl,
+          error: `URL "${parsed.hostname}" resolves to ${rec.address} — blocked (link-local / IMDS / multicast / reserved)`,
+          reason: "exit",
+        };
+      }
+      if (verdict === "private" && strict) {
+        return {
+          kind: "fetch_error",
+          url: rawUrl,
+          error: `URL "${parsed.hostname}" resolves to private IP ${rec.address} — blocked under CTX_FETCH_STRICT=1`,
+          reason: "exit",
+        };
+      }
+    }
+  } catch (err) {
+    return {
+      kind: "fetch_error",
+      url: rawUrl,
+      error: `DNS lookup failed for "${parsed.hostname}": ${err instanceof Error ? err.message : String(err)}`,
+      reason: "exit",
+    };
+  }
+
+  return null; // safe to fetch
+}
+
+/**
+ * Classify an IP address.
+ *   - "block":    always blocked (link-local/IMDS/multicast/reserved/malformed)
+ *   - "private":  loopback or RFC1918 — allowed by default, blocked in strict mode
+ *   - "public":   safe to fetch
+ *
+ * Exported (via the function name) so SSRF tests can exercise the matcher directly.
+ */
+export function classifyIp(ip: string): "block" | "private" | "public" {
+  const lower = ip.toLowerCase();
+
+  // IPv6 takes priority — check for `:` first so IPv4-mapped addresses
+  // (`::ffff:127.0.0.1`) don't get incorrectly routed through the IPv4 parser.
+  if (lower.includes(":")) {
+    // IPv4-mapped IPv6 (`::ffff:127.0.0.1`) — recurse through IPv4 classifier
+    const v4MappedMatch = lower.match(/^::ffff:([\d.]+)$/);
+    if (v4MappedMatch) return classifyIp(v4MappedMatch[1]);
+    // Hard-block
+    if (lower === "::") return "block"; // unspecified
+    if (lower.startsWith("fe8") || lower.startsWith("fe9") ||
+        lower.startsWith("fea") || lower.startsWith("feb")) return "block"; // fe80::/10 link-local
+    if (lower.startsWith("ff")) return "block"; // ff00::/8 multicast
+    // Private (loopback + ULA)
+    if (lower === "::1") return "private";
+    if (lower.startsWith("fc") || lower.startsWith("fd")) return "private"; // fc00::/7 ULA
+    return "public";
+  }
+
+  // IPv4 (or non-IP string — malformed = block)
+  if (!ip.includes(".")) return "block"; // not an IP at all
+  const parts = ip.split(".").map((p) => parseInt(p, 10));
+  if (parts.length !== 4 || parts.some((p) => isNaN(p) || p < 0 || p > 255)) return "block";
+  const [a, b] = parts;
+  // Hard-block (no legitimate use)
+  if (a === 169 && b === 254) return "block"; // link-local incl. 169.254.169.254 (IMDS)
+  if (a === 0) return "block";                 // 0.0.0.0/8 (current network)
+  if (a >= 224) return "block";                // 224.0.0.0+ multicast/reserved
+  // Private (loopback + RFC1918) — allow by default
+  if (a === 127) return "private";                          // 127.0.0.0/8 loopback
+  if (a === 10) return "private";                           // 10.0.0.0/8
+  if (a === 172 && b >= 16 && b <= 31) return "private";    // 172.16.0.0/12
+  if (a === 192 && b === 168) return "private";             // 192.168.0.0/16
+  return "public";
+}
+
 async function fetchOneUrl(url: string, source: string | undefined, force: boolean | undefined): Promise<FetchOneResult> {
+  // SSRF guard — reject file://, javascript:, loopback, RFC1918, IMDS, link-local
+  // BEFORE any cache lookup or subprocess spawn. Even cached entries shouldn't
+  // serve a previously-poisoned source label.
+  const ssrfBlock = await ssrfGuard(url);
+  if (ssrfBlock) return ssrfBlock;
+
   if (!force) {
     const store = getStore();
     // Cache key composes (source, url) so two distinct URLs sharing the same
@@ -2865,6 +3005,14 @@ async function main() {
     }
   };
   const gracefulShutdown = async () => {
+    // Final stats flush — bypass throttle so the last 0-500ms of
+    // bytes_indexed / bytes_returned aren't silently lost on SIGTERM/SIGINT
+    // (PR #401 grill-me review B1: persistStats early-returns inside throttle
+    // window; gracefulShutdown previously did NOT bypass).
+    try {
+      _lastStatsPersist = 0;
+      persistStats();
+    } catch { /* best effort — never block shutdown */ }
     shutdown();
     process.exit(0);
   };

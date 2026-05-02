@@ -544,15 +544,65 @@ function truncateToBytes(s: string, maxBytes: number): { value: string; truncate
   return { value: buf.subarray(0, cut).toString("utf8"), truncated: true };
 }
 
+/**
+ * Keys whose VALUES must be redacted before persisting tool_input — secrets,
+ * tokens, credentials, signatures. Match is on the LAST path segment of the
+ * key (case-insensitive substring), so `headers.Authorization`, `auth.token`,
+ * `apiKey`, `API_KEY`, `password`, `secret`, `cookie`, `set-cookie`, `signature`,
+ * `private_key`, etc. all redact. False-positive risk acceptable — we'd rather
+ * over-redact than ship a Bearer token to SQLite.
+ */
+const SECRET_KEY_PATTERN =
+  /(authorization|auth_token|access_token|refresh_token|bearer|token|secret|password|passwd|pwd|api[-_]?key|apikey|cookie|set-cookie|signature|private[-_]?key|client[-_]?secret|x[-_]?api[-_]?key)/i;
+
+const REDACTED = "[REDACTED]";
+
+/**
+ * Walk an arbitrary JSON-serializable value and return a clone with values
+ * redacted under any key matching SECRET_KEY_PATTERN. Cycle-safe.
+ */
+function redactSecrets(value: unknown, ancestors: WeakSet<object> = new WeakSet()): unknown {
+  if (value == null || typeof value !== "object") return value;
+  // Path-based ancestor check: only flag TRUE cycles, not DAG / shared refs
+  // (e.g., a single `headers` object passed to multiple sub-requests must
+  // be processed at every reference site, not flagged as circular).
+  if (ancestors.has(value as object)) return "[CIRCULAR]";
+  ancestors.add(value as object);
+
+  let out: unknown;
+  if (Array.isArray(value)) {
+    out = value.map((v) => redactSecrets(v, ancestors));
+  } else {
+    const obj: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (SECRET_KEY_PATTERN.test(k)) {
+        obj[k] = REDACTED;
+      } else {
+        obj[k] = redactSecrets(v, ancestors);
+      }
+    }
+    out = obj;
+  }
+
+  ancestors.delete(value as object); // pop ancestor — siblings can re-visit
+  return out;
+}
+
 function extractMcpToolCall(input: HookInput): SessionEvent[] {
   const { tool_name, tool_input } = input;
   if (!tool_name.startsWith("mcp__")) return [];
 
-  // Serialize params, then truncate the *string* (not the object) so the
-  // shape stays diagnosable even when the payload is huge.
+  // Redact secrets BEFORE serialization. Any `tool_input` carrying
+  // `Authorization: Bearer …`, `api_key: "sk-…"`, cookies, signatures, etc.
+  // is masked before it touches SQLite. Over-redaction acceptable — under-
+  // redaction is a credential leak to SessionDB.
+  const redactedInput = redactSecrets(tool_input ?? {});
+
+  // Serialize the redacted shape, then truncate the *string* (not the object)
+  // so the diagnosable shape survives huge payloads.
   let paramsStr: string;
   try {
-    paramsStr = JSON.stringify(tool_input ?? {});
+    paramsStr = JSON.stringify(redactedInput);
   } catch {
     paramsStr = "{}";
   }

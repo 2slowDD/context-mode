@@ -261,8 +261,10 @@ export class OpenCodeAdapter extends BaseAdapter implements HookAdapter {
   /**
    * OpenCode/KiloCode honor XDG_CONFIG_HOME on POSIX and APPDATA on Windows.
    * Falls back to ~/.config/<platform> (or %APPDATA%\<platform>).
+   * Always absolute. `_projectDir` is accepted for interface symmetry but
+   * unused — config is home/XDG-rooted, never project-scoped.
    */
-  getConfigDir(): string {
+  getConfigDir(_projectDir?: string): string {
     let root: string;
     if (process.platform === "win32") {
       root = process.env.APPDATA || join(homedir(), "AppData", "Roaming");

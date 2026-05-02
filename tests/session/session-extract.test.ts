@@ -1572,6 +1572,85 @@ describe("MCP Events", () => {
     const rawBytes = Buffer.byteLength(payload.params_raw, "utf8");
     assert.ok(rawBytes <= 2048, `raw bytes (${rawBytes}) exceed 2KB budget`);
   });
+
+  test("redacts secret-bearing keys before persisting (B3 token leakage fix)", () => {
+    // PR #401 review (grill-me) flagged: any MCP tool whose tool_input
+    // carries Authorization, api_key, password, etc. would be persisted
+    // verbatim to SessionDB. Reproduce + assert masking.
+    const events = extractEvents({
+      tool_name: "mcp__github__create_issue",
+      tool_input: {
+        repo: "owner/name",
+        title: "test",
+        headers: {
+          Authorization: "Bearer ghp_ABC123XYZ_secret_token",
+          "X-API-Key": "sk-real-key-here",
+          "Content-Type": "application/json",
+        },
+        auth: {
+          token: "another-secret",
+          api_key: "yet-another",
+        },
+        password: "p@ssw0rd!",
+        nested: {
+          deep: {
+            cookie: "session=secret-cookie",
+            ok_field: "kept",
+          },
+        },
+      },
+    });
+    const call = events.find((e) => e.category === "mcp_tool_call");
+    assert.ok(call, "mcp_tool_call event emitted");
+    const payload = JSON.parse(call!.data);
+
+    // No secret value should appear anywhere in serialized data
+    const serialized = call!.data;
+    assert.ok(!serialized.includes("ghp_ABC123XYZ_secret_token"), "Bearer token must be redacted");
+    assert.ok(!serialized.includes("sk-real-key-here"), "X-API-Key must be redacted");
+    assert.ok(!serialized.includes("another-secret"), "auth.token must be redacted");
+    assert.ok(!serialized.includes("yet-another"), "auth.api_key must be redacted");
+    assert.ok(!serialized.includes("p@ssw0rd!"), "password must be redacted");
+    assert.ok(!serialized.includes("session=secret-cookie"), "nested cookie must be redacted");
+
+    // Non-secret values must survive
+    assert.equal(payload.params.repo, "owner/name", "non-secret repo preserved");
+    assert.equal(payload.params.title, "test", "non-secret title preserved");
+    assert.equal(payload.params.headers["Content-Type"], "application/json", "non-secret header preserved");
+    assert.equal(payload.params.nested.deep.ok_field, "kept", "non-secret nested field preserved");
+
+    // Redacted values must show the sentinel
+    assert.equal(payload.params.headers.Authorization, "[REDACTED]");
+    assert.equal(payload.params.headers["X-API-Key"], "[REDACTED]");
+    assert.equal(payload.params.auth.token, "[REDACTED]");
+    assert.equal(payload.params.auth.api_key, "[REDACTED]");
+    assert.equal(payload.params.password, "[REDACTED]");
+    assert.equal(payload.params.nested.deep.cookie, "[REDACTED]");
+  });
+
+  test("shared-ref redaction (B3) — same secret object referenced multiple times stays redacted", () => {
+    // tool_input frequently uses shared object references (e.g., a single
+    // headers object passed to multiple sub-requests). Redaction must mask
+    // the value AT EVERY reference site, not just one.
+    const sharedHeaders = { Authorization: "Bearer SECRET-XYZ-shared", trace_id: "abc-123" };
+    const events = extractEvents({
+      tool_name: "mcp__test__shared",
+      tool_input: {
+        primary_request: { url: "https://api/x", headers: sharedHeaders },
+        retry_request: { url: "https://api/x", headers: sharedHeaders }, // SAME ref
+      },
+    });
+    const call = events.find((e) => e.category === "mcp_tool_call");
+    assert.ok(call, "mcp_tool_call event emitted for shared-ref input");
+    // Secret must be redacted at BOTH reference sites
+    assert.ok(!call!.data.includes("SECRET-XYZ-shared"), "shared secret value redacted at all sites");
+    const payload = JSON.parse(call!.data);
+    assert.equal(payload.params.primary_request.headers.Authorization, "[REDACTED]");
+    assert.equal(payload.params.retry_request.headers.Authorization, "[REDACTED]");
+    // Non-secret trace_id survives at both sites
+    assert.equal(payload.params.primary_request.headers.trace_id, "abc-123");
+    assert.equal(payload.params.retry_request.headers.trace_id, "abc-123");
+  });
 });
 
 // ════════════════════════════════════════════

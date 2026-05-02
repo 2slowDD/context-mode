@@ -207,20 +207,21 @@ export class OpenClawAdapter extends BaseAdapter implements HookAdapter {
   }
 
   /**
-   * OpenClaw stores everything in the project root — no separate
-   * config dir. Returned as empty so callers fall through to projectDir.
+   * OpenClaw stores everything in the project root — no separate config
+   * dir. Returned as the absolute project directory itself per the
+   * HookAdapter.getConfigDir contract (always-absolute).
    */
-  getConfigDir(): string {
-    return "";
+  getConfigDir(projectDir?: string): string {
+    return resolve(projectDir ?? process.cwd());
   }
 
   getInstructionFiles(): string[] {
     return ["AGENTS.md"];
   }
 
-  /** Project-relative ./memory directory. */
+  /** Absolute <projectRoot>/memory directory. */
   getMemoryDir(): string {
-    return "memory";
+    return join(this.getConfigDir(), "memory");
   }
 
   generateHookConfig(_pluginRoot: string): HookRegistration {

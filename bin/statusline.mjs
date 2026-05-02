@@ -29,6 +29,34 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { execFileSync } from "node:child_process";
+
+// ── Schema versioning ───────────────────────────────────────────────────
+// Bumped by the MCP writer (src/server.ts) when the persisted stats payload
+// shape changes. Statusline reads `schemaVersion` from the payload:
+//   - missing  → legacy v1.0.103 era, proceed with sensible defaults
+//   - <= KNOWN → safe to render fully
+//   - >  KNOWN → newer writer than this reader; warn once + render what we
+//                still understand (graceful degrade rather than blank bar)
+const KNOWN_SCHEMA_VERSION = 1;
+
+// Test seams — keep production behaviour identical when env vars unset.
+//   CTX_TEST_PLATFORM — override process.platform for cross-OS resolver tests
+//   CTX_TEST_PROC_DIR — override /proc base dir for Linux PID-walk tests
+const TEST_PLATFORM = process.env.CTX_TEST_PLATFORM;
+const PROC_DIR = process.env.CTX_TEST_PROC_DIR || "/proc";
+function platform() {
+  return TEST_PLATFORM || process.platform;
+}
+
+// Single-shot stderr warning latch — keep noise out of Claude Code's
+// statusline output even when our parent runs us repeatedly per session.
+let __winWarned = false;
+function warnOnce(key, msg) {
+  if (key === "win" && __winWarned) return;
+  if (key === "win") __winWarned = true;
+  try { process.stderr.write(`context-mode statusline: ${msg}\n`); } catch { /* ignore */ }
+}
 
 // ── ANSI palette (single chromatic accent on the status dot) ────────────
 const NO_COLOR = process.env.NO_COLOR || !process.stdout.isTTY;
@@ -63,21 +91,67 @@ function resolveSessionDir() {
  * Walk up the parent process chain to find the Claude Code PID.
  *
  * Claude Code spawns the status line through a shell, so process.ppid is
- * the intermediate shell, not Claude Code itself. We follow `PPid:` in
- * /proc/<pid>/status until we find a `claude` process. Falls back to
- * process.ppid when /proc isn't available (non-Linux).
+ * the intermediate shell, not Claude Code itself. We walk up until we find
+ * a process whose name matches /claude/i.
+ *
+ * Per-OS resolver:
+ *   - linux: read PPid + Name from /proc/<pid>/status
+ *   - darwin: ps -o ppid=,comm= -p <pid> (BSD ps; works without /proc)
+ *   - win32: degraded — process.ppid only, with a one-shot stderr warning
+ *
+ * Without this walk, multiple concurrent Claude sessions all see the same
+ * shell ppid and collide on the fuzzy mtime fallback in findStatsFile.
  */
 function findClaudePid() {
-  if (process.platform !== "linux") return process.ppid;
+  const plat = platform();
+  if (plat === "linux") return findClaudePidLinux();
+  if (plat === "darwin") return findClaudePidDarwin();
+  if (plat === "win32") {
+    warnOnce(
+      "win",
+      "Windows process-tree walk unsupported; multiple concurrent Claude sessions may collide. Set CLAUDE_SESSION_ID for deterministic resolution.",
+    );
+    return process.ppid;
+  }
+  return process.ppid;
+}
+
+function findClaudePidLinux() {
   let pid = process.ppid;
   for (let i = 0; i < 8 && pid && pid > 1; i++) {
     try {
-      const status = readFileSync(`/proc/${pid}/status`, "utf-8");
+      const status = readFileSync(`${PROC_DIR}/${pid}/status`, "utf-8");
       const nameMatch = status.match(/^Name:\s+(.+)$/m);
       const ppidMatch = status.match(/^PPid:\s+(\d+)/m);
       const name = nameMatch?.[1]?.trim() ?? "";
       if (/claude/i.test(name)) return pid;
       pid = ppidMatch ? Number(ppidMatch[1]) : 0;
+    } catch {
+      return process.ppid;
+    }
+  }
+  return process.ppid;
+}
+
+function findClaudePidDarwin() {
+  let pid = process.ppid;
+  for (let i = 0; i < 8 && pid && pid > 1; i++) {
+    try {
+      // `ps -o ppid=,comm= -p <pid>` → "  12345 /path/to/claude"
+      const out = execFileSync(
+        "ps",
+        ["-o", "ppid=,comm=", "-p", String(pid)],
+        { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] },
+      ).trim();
+      if (!out) return process.ppid;
+      const m = out.match(/^\s*(\d+)\s+(.+)$/);
+      if (!m) return process.ppid;
+      const parentPid = Number(m[1]);
+      const comm = m[2].trim();
+      // comm may be a path; check basename for claude
+      const base = comm.split("/").pop() || comm;
+      if (/claude/i.test(base)) return pid;
+      pid = parentPid;
     } catch {
       return process.ppid;
     }
@@ -121,7 +195,22 @@ function findStatsFile(sessionDir, sessionId) {
 
 function loadStats(path) {
   try {
-    return JSON.parse(readFileSync(path, "utf-8"));
+    const parsed = JSON.parse(readFileSync(path, "utf-8"));
+    if (parsed && typeof parsed === "object") {
+      // schemaVersion is optional — legacy v1.0.103 payloads omit it.
+      // Default to 0 so unknown-newer detection still has a clean compare.
+      const version = Number.isFinite(parsed.schemaVersion)
+        ? parsed.schemaVersion
+        : 0;
+      if (version > KNOWN_SCHEMA_VERSION) {
+        try {
+          process.stderr.write(
+            `context-mode statusline: stats schemaVersion=${version} newer than known=${KNOWN_SCHEMA_VERSION}; rendering known fields only. Upgrade context-mode to suppress this warning.\n`,
+          );
+        } catch { /* ignore */ }
+      }
+    }
+    return parsed;
   } catch {
     return null;
   }

@@ -49,11 +49,16 @@ export abstract class BaseAdapter {
 
   /**
    * Default: build config dir from sessionDirSegments rooted at $HOME.
-   * Adapters with project-scoped or non-home-rooted config dirs
-   * (cursor, vscode-copilot, jetbrains-copilot, openclaw, opencode)
-   * override this.
+   *
+   * Contract: ALWAYS returns an absolute path. Adapters with project-scoped
+   * or non-home-rooted config dirs (cursor, vscode-copilot, jetbrains-copilot,
+   * openclaw, opencode) override this and resolve their segments against
+   * `projectDir` (or `process.cwd()` when omitted).
+   *
+   * @param _projectDir Unused by the home-rooted default — accepted so
+   *                    project-scoped overrides honor the same signature.
    */
-  getConfigDir(): string {
+  getConfigDir(_projectDir?: string): string {
     return join(homedir(), ...this.sessionDirSegments);
   }
 
@@ -66,8 +71,9 @@ export abstract class BaseAdapter {
   }
 
   /**
-   * Default: <configDir>/memory. Adapters with a different memory dir
-   * name (e.g., codex uses "memories" plural) override this.
+   * Default: <configDir>/memory. Always absolute (configDir is absolute by
+   * contract). Adapters with a different memory dir name (e.g., codex uses
+   * "memories" plural) override this.
    */
   getMemoryDir(): string {
     return join(this.getConfigDir(), "memory");

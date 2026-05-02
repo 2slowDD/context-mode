@@ -2,7 +2,7 @@ import "../setup-home";
 import { fakeHome } from "../setup-home";
 import { describe, it, expect } from "vitest";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 
 // Adapters that honor XDG_CONFIG_HOME / APPDATA (e.g. opencode) read the env
 // var BEFORE falling back to homedir(). GitHub Actions Ubuntu can have these
@@ -13,6 +13,7 @@ process.env.XDG_DATA_HOME = join(fakeHome, ".local", "share");
 process.env.APPDATA = join(fakeHome, "AppData", "Roaming");
 process.env.LOCALAPPDATA = join(fakeHome, "AppData", "Local");
 
+import { ClaudeCodeAdapter } from "../../src/adapters/claude-code/index.js";
 import { QwenCodeAdapter } from "../../src/adapters/qwen-code/index.js";
 import { GeminiCLIAdapter } from "../../src/adapters/gemini-cli/index.js";
 import { CodexAdapter } from "../../src/adapters/codex/index.js";
@@ -109,55 +110,64 @@ describe("Adapter memory conventions", () => {
     });
   });
 
+  // Project-scoped adapters resolve their convention dir against an
+  // explicit projectDir per the always-absolute getConfigDir contract.
+  const projectDir = join(fakeHome, "fixture-project");
+
   describe("CursorAdapter", () => {
     const a = new CursorAdapter();
-    it("getConfigDir is .cursor (project-relative)", () => {
-      expect(a.getConfigDir()).toBe(".cursor");
+    it("getConfigDir is <project>/.cursor (absolute)", () => {
+      expect(a.getConfigDir(projectDir)).toBe(resolve(projectDir, ".cursor"));
     });
     it("getInstructionFiles is ['context-mode.mdc']", () => {
       expect(a.getInstructionFiles()).toEqual(["context-mode.mdc"]);
     });
-    it("getMemoryDir is .cursor/memory (project-relative)", () => {
-      expect(a.getMemoryDir()).toBe(join(".cursor", "memory"));
+    it("getMemoryDir is <cwd>/.cursor/memory (absolute, no projectDir → cwd)", () => {
+      // getMemoryDir() inherits BaseAdapter's default which calls
+      // getConfigDir() without args → cursor falls back to process.cwd().
+      expect(a.getMemoryDir()).toBe(resolve(process.cwd(), ".cursor", "memory"));
     });
   });
 
   describe("VSCodeCopilotAdapter", () => {
     const a = new VSCodeCopilotAdapter();
-    it("getConfigDir is .github (project-relative)", () => {
-      expect(a.getConfigDir()).toBe(".github");
+    it("getConfigDir is <project>/.github (absolute)", () => {
+      expect(a.getConfigDir(projectDir)).toBe(resolve(projectDir, ".github"));
     });
     it("getInstructionFiles is ['copilot-instructions.md']", () => {
       expect(a.getInstructionFiles()).toEqual(["copilot-instructions.md"]);
     });
-    it("getMemoryDir is .github/memory", () => {
-      expect(a.getMemoryDir()).toBe(join(".github", "memory"));
+    it("getMemoryDir is <cwd>/.github/memory (absolute)", () => {
+      expect(a.getMemoryDir()).toBe(resolve(process.cwd(), ".github", "memory"));
     });
   });
 
   describe("JetBrainsCopilotAdapter", () => {
     const a = new JetBrainsCopilotAdapter();
-    it("getConfigDir is .github (project-relative)", () => {
-      expect(a.getConfigDir()).toBe(".github");
+    it("getConfigDir is <project>/.github (absolute)", () => {
+      expect(a.getConfigDir(projectDir)).toBe(resolve(projectDir, ".github"));
     });
     it("getInstructionFiles is ['copilot-instructions.md']", () => {
       expect(a.getInstructionFiles()).toEqual(["copilot-instructions.md"]);
     });
-    it("getMemoryDir is .github/memory", () => {
-      expect(a.getMemoryDir()).toBe(join(".github", "memory"));
+    it("getMemoryDir is <project>/.github/memory (absolute)", () => {
+      // JetBrains adapter resolves via its own getProjectDir() (env var
+      // chain or cwd) when getMemoryDir() is called without args.
+      expect(isAbsolute(a.getMemoryDir())).toBe(true);
+      expect(a.getMemoryDir().endsWith(join(".github", "memory"))).toBe(true);
     });
   });
 
   describe("KiroAdapter", () => {
     const a = new KiroAdapter();
-    it("getConfigDir is .kiro (project-relative)", () => {
-      expect(a.getConfigDir()).toBe(".kiro");
+    it("getConfigDir is <project>/.kiro (absolute)", () => {
+      expect(a.getConfigDir(projectDir)).toBe(resolve(projectDir, ".kiro"));
     });
     it("getInstructionFiles is ['KIRO.md']", () => {
       expect(a.getInstructionFiles()).toEqual(["KIRO.md"]);
     });
-    it("getMemoryDir is .kiro/memory", () => {
-      expect(a.getMemoryDir()).toBe(join(".kiro", "memory"));
+    it("getMemoryDir is <cwd>/.kiro/memory (absolute)", () => {
+      expect(a.getMemoryDir()).toBe(resolve(process.cwd(), ".kiro", "memory"));
     });
   });
 
@@ -191,14 +201,62 @@ describe("Adapter memory conventions", () => {
 
   describe("OpenClawAdapter", () => {
     const a = new OpenClawAdapter();
-    it("getConfigDir is empty string (project-rooted)", () => {
-      expect(a.getConfigDir()).toBe("");
+    it("getConfigDir is <project> root (absolute)", () => {
+      expect(a.getConfigDir(projectDir)).toBe(resolve(projectDir));
     });
     it("getInstructionFiles is ['AGENTS.md']", () => {
       expect(a.getInstructionFiles()).toEqual(["AGENTS.md"]);
     });
-    it("getMemoryDir is 'memory' (project-relative)", () => {
-      expect(a.getMemoryDir()).toBe("memory");
+    it("getMemoryDir is <cwd>/memory (absolute)", () => {
+      expect(a.getMemoryDir()).toBe(resolve(process.cwd(), "memory"));
     });
+  });
+
+  // ──────────────────────────────────────────────────────────────────
+  // Cross-adapter contract — getConfigDir() ALWAYS returns absolute
+  //
+  // Catches the leaky-seam bug where some adapters returned project-
+  // relative segments ("", ".cursor", ".github", ".kiro") and others
+  // returned absolute paths. Every consumer (server.ts, auto-memory.ts)
+  // can now treat the return uniformly without isAbsolute() guards.
+  // ──────────────────────────────────────────────────────────────────
+  describe("HookAdapter.getConfigDir contract", () => {
+    const projectDirForContract = join(fakeHome, "fixture-project");
+
+    const allAdapters: Array<{ name: string; instance: { getConfigDir: (p?: string) => string } }> = [
+      { name: "ClaudeCodeAdapter", instance: new ClaudeCodeAdapter() },
+      { name: "QwenCodeAdapter", instance: new QwenCodeAdapter() },
+      { name: "GeminiCLIAdapter", instance: new GeminiCLIAdapter() },
+      { name: "CodexAdapter", instance: new CodexAdapter() },
+      { name: "OpenCodeAdapter (opencode)", instance: new OpenCodeAdapter() },
+      { name: "OpenCodeAdapter (kilo)", instance: new OpenCodeAdapter("kilo") },
+      { name: "CursorAdapter", instance: new CursorAdapter() },
+      { name: "VSCodeCopilotAdapter", instance: new VSCodeCopilotAdapter() },
+      { name: "JetBrainsCopilotAdapter", instance: new JetBrainsCopilotAdapter() },
+      { name: "KiroAdapter", instance: new KiroAdapter() },
+      { name: "ZedAdapter", instance: new ZedAdapter() },
+      { name: "AntigravityAdapter", instance: new AntigravityAdapter() },
+      { name: "OpenClawAdapter", instance: new OpenClawAdapter() },
+    ];
+
+    it.each(allAdapters)(
+      "$name.getConfigDir(projectDir) returns an absolute path",
+      ({ instance }) => {
+        const dir = instance.getConfigDir(projectDirForContract);
+        expect(typeof dir).toBe("string");
+        expect(dir.length).toBeGreaterThan(0);
+        expect(isAbsolute(dir)).toBe(true);
+      },
+    );
+
+    it.each(allAdapters)(
+      "$name.getConfigDir() (no args) still returns an absolute path",
+      ({ instance }) => {
+        const dir = instance.getConfigDir();
+        expect(typeof dir).toBe("string");
+        expect(dir.length).toBeGreaterThan(0);
+        expect(isAbsolute(dir)).toBe(true);
+      },
+    );
   });
 });

@@ -214,11 +214,12 @@ export class CursorAdapter extends BaseAdapter implements HookAdapter {
   }
 
   /**
-   * Cursor stores conventions per project under .cursor/. Returned as a
-   * project-relative path; callers resolve against projectDir.
+   * Cursor stores conventions per project under .cursor/. Always returned
+   * as an absolute path resolved against `projectDir` (or `process.cwd()`
+   * when omitted) per the HookAdapter.getConfigDir contract.
    */
-  getConfigDir(): string {
-    return ".cursor";
+  getConfigDir(projectDir?: string): string {
+    return resolve(projectDir ?? process.cwd(), ".cursor");
   }
 
   getInstructionFiles(): string[] {

@@ -1,6 +1,26 @@
 import { execFileSync, execSync } from "node:child_process";
 import { existsSync } from "node:fs";
 
+/**
+ * Allowlist for SHELL env override. Only POSIX shells + Windows shells permit
+ * arbitrary command interpretation; anything else (e.g., /usr/bin/python set
+ * as SHELL) would let an attacker redirect the executor to a non-shell binary.
+ *
+ * basename split handles BOTH `/` and `\` separators so a Windows-style path
+ * (`C:\Program Files\PowerShell\7\pwsh.exe`) classifies correctly even when
+ * the runtime is on POSIX (where node:path.basename only splits on `/`).
+ *
+ * Match is case-insensitive; `.exe` extension tolerated for Windows binaries.
+ */
+const ALLOWED_SHELL_BASENAMES = /^(bash|sh|zsh|dash|pwsh|powershell|cmd)(\.exe)?$/i;
+
+export function isAllowlistedShell(shellPath: string): boolean {
+  // Cross-OS basename: split on either separator, take the last segment.
+  const segments = shellPath.split(/[\\/]/);
+  const base = segments[segments.length - 1];
+  return ALLOWED_SHELL_BASENAMES.test(base);
+}
+
 export type Language =
   | "javascript"
   | "typescript"
@@ -128,11 +148,18 @@ export function detectRuntimes(): RuntimeMap {
   const hasBun = bunExists();
   const bun = hasBun ? bunCommand() : null;
 
-  // Honor SHELL env var when it points at a real binary. Lets users with
-  // non-standard setups (WSL, custom bash, msys2) pin context-mode to
-  // their preferred shell instead of relying on auto-detection.
+  // Honor SHELL env var when it points at a real binary AND the basename is
+  // an allowlisted shell. Lets users with non-standard setups (WSL, custom
+  // bash, msys2) pin context-mode to their preferred shell.
+  //
+  // Allowlist (PR #401 ops review): basename must match
+  // /^(bash|sh|zsh|dash|pwsh|cmd)(\.exe)?$/. Without this guard, an attacker
+  // who controls SHELL (e.g., supply-chain compromise of a profile script)
+  // could redirect the executor to /usr/bin/python or any arbitrary binary.
   const userShell = process.env.SHELL;
-  const shellOverride = userShell && existsSync(userShell) ? userShell : null;
+  const shellOverride = userShell && existsSync(userShell) && isAllowlistedShell(userShell)
+    ? userShell
+    : null;
   const isWin = process.platform === "win32";
 
   return {

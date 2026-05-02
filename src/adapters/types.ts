@@ -219,13 +219,24 @@ export interface HookAdapter {
   getSessionEventsPath(projectDir: string): string;
 
   /**
-   * Platform config directory (e.g., ~/.claude, ~/.codex, ~/.qwen,
-   * ~/.config/opencode). For project-scoped platforms (cursor,
-   * vscode-copilot, jetbrains-copilot, openclaw), returns the in-project
-   * convention dir name (e.g., ".cursor", ".github") — callers resolve
-   * against projectDir as needed. Used for auto-memory + ctx_search timeline.
+   * Platform config directory.
+   *
+   * Contract: ALWAYS returns an absolute path. Never returns a relative
+   * segment, never returns an empty string. This eliminates the leaky-seam
+   * where callers could not tell whether the return needed further resolution.
+   *
+   * Resolution rules:
+   *   - Home-rooted platforms (claude-code, codex, qwen, gemini, antigravity,
+   *     zed, opencode, …) return paths under `homedir()` / XDG / APPDATA.
+   *   - Project-scoped platforms (cursor → `.cursor`, vscode-copilot &
+   *     jetbrains-copilot → `.github`, kiro → `.kiro`, openclaw → project root)
+   *     resolve their segment against the supplied `projectDir`. When
+   *     `projectDir` is omitted, `process.cwd()` is used as the fallback.
+   *
+   * @param projectDir Optional project root used to resolve project-scoped
+   *                   adapters. Ignored by home-rooted adapters.
    */
-  getConfigDir(): string;
+  getConfigDir(projectDir?: string): string;
 
   /**
    * Names of platform-native instruction/rule files that act as the

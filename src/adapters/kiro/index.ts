@@ -159,11 +159,12 @@ export class KiroAdapter extends BaseAdapter implements HookAdapter {
 
   /**
    * Kiro stores per-project context under .kiro/ (steering files, etc).
-   * Auto-memory + rule detection use this project-relative dir.
+   * Auto-memory + rule detection use this project-relative dir, returned as
+   * an absolute path resolved against `projectDir` (or `process.cwd()`).
    * (Settings/MCP config still live under ~/.kiro/.)
    */
-  getConfigDir(): string {
-    return ".kiro";
+  getConfigDir(projectDir?: string): string {
+    return resolve(projectDir ?? process.cwd(), ".kiro");
   }
 
   getInstructionFiles(): string[] {
