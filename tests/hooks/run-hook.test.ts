@@ -16,11 +16,14 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..", "..");
 const RUN_HOOK_PATH = resolve(REPO_ROOT, "hooks", "run-hook.mjs");
+// Windows ESM rejects raw absolute paths in `import` (ERR_UNSUPPORTED_ESM_URL_SCHEME).
+// Always emit file:// URLs into the spawned-script `import` statements.
+const RUN_HOOK_URL = pathToFileURL(RUN_HOOK_PATH).href;
 
 function runScript(script: string, env: Record<string, string>) {
   return spawnSync(process.execPath, ["--input-type=module", "-e", script], {
@@ -44,7 +47,7 @@ describe("runHook wrapper", () => {
 
   it("invokes the handler when imports succeed", () => {
     const script = `
-      import { runHook } from ${JSON.stringify(RUN_HOOK_PATH)};
+      import { runHook } from ${JSON.stringify(RUN_HOOK_URL)};
       let called = false;
       await runHook(async () => { called = true; });
       console.log("called=" + called);
@@ -56,7 +59,7 @@ describe("runHook wrapper", () => {
 
   it("logs to ~/.claude/context-mode/hook-errors.log when handler throws, then exits 0", () => {
     const script = `
-      import { runHook } from ${JSON.stringify(RUN_HOOK_PATH)};
+      import { runHook } from ${JSON.stringify(RUN_HOOK_URL)};
       await runHook(async () => { throw new Error("boom-handler"); });
       console.log("after-runHook");
     `;
@@ -85,9 +88,9 @@ describe("runHook wrapper", () => {
     writeFileSync(join(fakeHookDir, "suppress-stderr.mjs"), `throw new Error("poisoned-suppress");`);
     writeFileSync(join(fakeHookDir, "ensure-deps.mjs"), `throw new Error("poisoned-deps");`);
 
-    const fakePath = join(fakeHookDir, "run-hook.mjs");
+    const fakeUrl = pathToFileURL(join(fakeHookDir, "run-hook.mjs")).href;
     const script = `
-      import { runHook } from ${JSON.stringify(fakePath)};
+      import { runHook } from ${JSON.stringify(fakeUrl)};
       let called = false;
       await runHook(async () => { called = true; });
       console.log("called=" + called);
@@ -110,7 +113,7 @@ describe("runHook wrapper", () => {
     // Schedule an async throw that escapes the handler's try/catch
     // by deferring it to the next tick.
     const script = `
-      import { runHook } from ${JSON.stringify(RUN_HOOK_PATH)};
+      import { runHook } from ${JSON.stringify(RUN_HOOK_URL)};
       await runHook(async () => {
         // Fire-and-forget rejection (escapes handler's try/catch via microtask)
         setImmediate(() => { throw new Error("late-uncaught"); });

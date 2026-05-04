@@ -12,6 +12,7 @@ import { readFileSync, existsSync, accessSync, constants, mkdirSync, writeFileSy
 import { resolve, join } from "node:path";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { execSync } from "node:child_process";
 import { toUnixPath } from "../../src/cli.js";
 
 const ROOT = resolve(import.meta.dirname, "../..");
@@ -173,9 +174,17 @@ describe(".mcp.json — MCP server config", () => {
     // bundled server path. Repo-root .mcp.json is for contributors opening
     // the repo as a regular project and uses a relative path to avoid the
     // "Missing environment variable: CLAUDE_PLUGIN_ROOT" warning.
-    const plugin = JSON.parse(
-      readFileSync(resolve(ROOT, ".claude-plugin", "plugin.json"), "utf-8"),
-    );
+    //
+    // We read the COMMITTED file via `git show HEAD:` rather than the
+    // working-tree copy because hooks/normalize-hooks.mjs intentionally
+    // rewrites the on-disk plugin.json to absolute paths on Windows after
+    // postinstall (#378 — MSYS path mangling). The marketplace assertion
+    // is about what we SHIP, not about what local install scripts mutate.
+    const committed = execSync("git show HEAD:.claude-plugin/plugin.json", {
+      cwd: ROOT,
+      encoding: "utf-8",
+    });
+    const plugin = JSON.parse(committed);
     const args = plugin.mcpServers["context-mode"].args;
     expect(args[0]).toContain("CLAUDE_PLUGIN_ROOT");
   });
