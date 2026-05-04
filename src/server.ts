@@ -3114,6 +3114,14 @@ async function main() {
     fetchLatestVersion().then(v => { if (v !== "unknown") _latestVersion = v; });
   }, 60 * 60 * 1000).unref();
 
+  // Stats heartbeat — keep the statusline truthful while the user works in
+  // tools other than MCP (Bash/Read/Edit during long sessions or post-/compact
+  // pauses). Without this, stats.updated_at only advances on MCP tool calls,
+  // so bin/statusline.mjs falsely flips to "stale — restart to resume saving"
+  // even though the server is alive. Heartbeat refreshes updated_at every 60s;
+  // statusline staleness threshold is 30min (cliff is 30 missed ticks away).
+  setInterval(() => persistStats(), 60_000).unref();
+
   console.error(`Context Mode MCP server v${VERSION} running on stdio`);
   console.error(`Detected runtimes:\n${getRuntimeSummary(runtimes)}`);
   if (!hasBunRuntime()) {

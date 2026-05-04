@@ -973,15 +973,45 @@ async function upgrade() {
  * ------------------------------------------------------- */
 
 function statuslineForward(): void {
-  const scriptPath = resolve(getPluginRoot(), "bin", "statusline.mjs");
-  if (!existsSync(scriptPath)) {
-    process.stderr.write(`statusline script missing: ${scriptPath}\n`);
-    process.exit(1);
+  // Try multiple plugin-root candidates in priority order. After ctx-upgrade,
+  // getPluginRoot() can resolve to a cache dir that sessionstart.mjs (#181)
+  // already cleaned, leaving bin/statusline.mjs missing. Falling back to the
+  // marketplace clone (#418-synced, stable across upgrades) and to the path
+  // Claude Code itself loads from (installed_plugins.json) keeps the bar
+  // alive instead of silently going blank.
+  const candidates: string[] = [
+    resolve(getPluginRoot(), "bin", "statusline.mjs"),
+    resolve(homedir(), ".claude", "plugins", "marketplaces", "context-mode", "bin", "statusline.mjs"),
+  ];
+
+  // installed_plugins.json may list one or more install paths CC actually
+  // loads from. Prefer those if they exist.
+  try {
+    const registryPath = resolve(homedir(), ".claude", "plugins", "installed_plugins.json");
+    if (existsSync(registryPath)) {
+      const registry = JSON.parse(readFileSync(registryPath, "utf-8"));
+      const entries = registry?.plugins?.["context-mode@context-mode"];
+      if (Array.isArray(entries)) {
+        for (const entry of entries) {
+          const installPath = entry?.installPath;
+          if (typeof installPath === "string" && installPath) {
+            candidates.push(resolve(installPath, "bin", "statusline.mjs"));
+          }
+        }
+      }
+    }
+  } catch { /* registry malformed — fall through to other candidates */ }
+
+  const scriptPath = candidates.find((c) => existsSync(c));
+  if (!scriptPath) {
+    // Statusline output is the user-facing status bar; stderr surfaces visibly
+    // in some terminals. Exit silently — the bar simply stays empty until the
+    // next /ctx-upgrade or restart resolves the path.
+    process.exit(0);
   }
   // Re-exec via dynamic import so stdin/stdout are inherited cleanly.
-  import(pathToFileURL(scriptPath).href).catch((err) => {
-    process.stderr.write(`statusline failed: ${err?.message ?? err}\n`);
-    process.exit(1);
+  import(pathToFileURL(scriptPath).href).catch(() => {
+    process.exit(0);
   });
 }
 
